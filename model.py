@@ -1,0 +1,522 @@
+"""
+ViT to TimeSeries Model
+
+Combines Vision Transformer encoder with custom Transformer decoder
+using CORAL domain bridging.
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import ViTModel
+from typing import Optional, Dict, Any, Tuple
+import numpy as np
+import math
+
+from bridge import CorrelationAlignment
+
+
+class PositionalEncoding(nn.Module):
+    """
+    Positional encoding for time series generation.
+    Similar to transformer positional encoding but adapted for time series.
+    """
+    
+    def __init__(self, d_model: int, max_len: int = 1000):
+        super().__init__()
+        
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)  # Shape: (max_len, 1, d_model)
+        
+        self.register_buffer('pe', pe)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor of shape (seq_len, batch_size, d_model)
+        """
+        return x + self.pe[:x.size(0), :]
+
+
+class TimeSeriesTransformerDecoder(nn.Module):
+    """
+    Custom Transformer decoder for time series generation from context vector.
+    
+    Takes a single context vector and generates a fixed-length time series
+    using autoregressive generation with cross-attention.
+    """
+    
+    def __init__(
+        self,
+        context_dim: int,
+        d_model: int = 256,
+        nhead: int = 8,
+        num_layers: int = 4,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
+        prediction_length: int = 24,
+        time_series_dim: int = 1,
+    ):
+        super().__init__()
+        
+        self.context_dim = context_dim
+        self.d_model = d_model
+        self.prediction_length = prediction_length
+        self.time_series_dim = time_series_dim
+        
+        # Project context vector to d_model dimension for cross-attention
+        self.context_projection = nn.Linear(context_dim, d_model)
+        
+        # Embedding layer for time series values
+        self.value_embedding = nn.Linear(time_series_dim, d_model)
+        
+        # Positional encoding
+        self.pos_encoding = PositionalEncoding(d_model, max_len=prediction_length)
+        
+        # Transformer decoder layers
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=False  # Use (seq_len, batch, features) format
+        )
+        
+        self.transformer_decoder = nn.TransformerDecoder(
+            decoder_layer=decoder_layer,
+            num_layers=num_layers
+        )
+        
+        # Output projection to time series dimension
+        self.output_projection = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model // 2, time_series_dim)
+        )
+        
+        # Start token embedding (learnable)
+        self.start_token = nn.Parameter(torch.randn(1, 1, time_series_dim))
+        
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights with appropriate scaling."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+    
+    def _generate_square_subsequent_mask(self, sz: int, device: torch.device) -> torch.Tensor:
+        """Generate causal mask for autoregressive generation."""
+        mask = torch.triu(torch.ones(sz, sz, device=device)) == 1
+        mask = mask.transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        return mask
+    
+    def forward(
+        self, 
+        context: torch.Tensor, 
+        target_sequence: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Forward pass for training with teacher forcing.
+        
+        Args:
+            context: Context vector from image encoding (batch_size, context_dim)
+            target_sequence: Target time series for training (batch_size, seq_len, time_series_dim)
+            
+        Returns:
+            Predicted time series (batch_size, prediction_length, time_series_dim)
+        """
+        batch_size = context.size(0)
+        device = context.device
+        
+        # Project context to d_model
+        projected_context = self.context_projection(context)  # (batch_size, d_model)
+        
+        # Create memory for cross-attention (context needs to be in sequence format)
+        # We'll use the context as a single "token" in memory
+        memory = projected_context.unsqueeze(0)  # (1, batch_size, d_model)
+        
+        if self.training and target_sequence is not None:
+            # Training mode with teacher forcing
+            seq_len = target_sequence.size(1)
+            
+            # Create input sequence by prepending start token
+            start_tokens = self.start_token.expand(batch_size, 1, self.time_series_dim)
+            if seq_len > 1:
+                # Use shifted target sequence (exclude last token for input)
+                decoder_input = torch.cat([start_tokens, target_sequence[:, :-1, :]], dim=1)
+            else:
+                decoder_input = start_tokens
+            
+            # Embed decoder input
+            embedded_input = self.value_embedding(decoder_input)  # (batch_size, seq_len, d_model)
+            
+            # Transpose for transformer: (seq_len, batch_size, d_model)
+            embedded_input = embedded_input.transpose(0, 1)
+            
+            # Add positional encoding
+            embedded_input = self.pos_encoding(embedded_input)
+            
+            # Create causal mask
+            tgt_mask = self._generate_square_subsequent_mask(embedded_input.size(0), device)
+            
+            # Pass through transformer decoder
+            decoder_output = self.transformer_decoder(
+                tgt=embedded_input,
+                memory=memory,
+                tgt_mask=tgt_mask
+            )  # (seq_len, batch_size, d_model)
+            
+            # Project to output dimension
+            predictions = self.output_projection(decoder_output)  # (seq_len, batch_size, time_series_dim)
+            
+            # Transpose back to batch first: (batch_size, seq_len, time_series_dim)
+            predictions = predictions.transpose(0, 1)
+            
+            return predictions
+        else:
+            # Inference mode - autoregressive generation
+            return self.generate(context)
+    
+    def generate(self, context: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
+        """
+        Generate time series autoregressively from context.
+        
+        Args:
+            context: Context vector (batch_size, context_dim)
+            temperature: Temperature for generation (not used for deterministic output)
+            
+        Returns:
+            Generated time series (batch_size, prediction_length, time_series_dim)
+        """
+        batch_size = context.size(0)
+        device = context.device
+        
+        # Project context
+        projected_context = self.context_projection(context)
+        memory = projected_context.unsqueeze(0)  # (1, batch_size, d_model)
+        
+        # Initialize with start token
+        generated_sequence = []
+        current_input = self.start_token.expand(batch_size, 1, self.time_series_dim)
+        
+        for step in range(self.prediction_length):
+            # Embed current input sequence
+            embedded_input = self.value_embedding(current_input)  # (batch_size, step+1, d_model)
+            embedded_input = embedded_input.transpose(0, 1)  # (step+1, batch_size, d_model)
+            
+            # Add positional encoding
+            embedded_input = self.pos_encoding(embedded_input)
+            
+            # Create causal mask
+            seq_len = embedded_input.size(0)
+            tgt_mask = self._generate_square_subsequent_mask(seq_len, device)
+            
+            # Pass through transformer decoder
+            decoder_output = self.transformer_decoder(
+                tgt=embedded_input,
+                memory=memory,
+                tgt_mask=tgt_mask
+            )  # (step+1, batch_size, d_model)
+            
+            # Get the last timestep output
+            last_output = decoder_output[-1:, :, :]  # (1, batch_size, d_model)
+            
+            # Project to time series dimension
+            next_value = self.output_projection(last_output)  # (1, batch_size, time_series_dim)
+            next_value = next_value.transpose(0, 1)  # (batch_size, 1, time_series_dim)
+            
+            # Add to generated sequence
+            generated_sequence.append(next_value)
+            
+            # Update current input for next iteration
+            current_input = torch.cat([current_input, next_value], dim=1)
+        
+        # Concatenate all generated values
+        full_sequence = torch.cat(generated_sequence, dim=1)  # (batch_size, prediction_length, time_series_dim)
+        
+        return full_sequence
+
+
+class ViTToTimeSeriesModel(nn.Module):
+    """
+    Custom architecture combining ViT encoder with Transformer decoder.
+    
+    Uses CORAL (Correlation Alignment) for domain bridging between
+    computer vision and time series domains.
+    """
+    
+    def __init__(
+        self,
+        vit_model_name: str = "google/vit-base-patch16-224",
+        prediction_length: int = 24,
+        context_length: int = 48,  # Not used but kept for compatibility
+        feature_projection_dim: int = 256,
+        time_series_dim: int = 1,
+        ts_model_dim: int = 256,
+        ts_num_heads: int = 8,
+        ts_num_layers: int = 4,
+        ts_dim_feedforward: int = 1024,
+        ts_dropout: float = 0.1,
+        image_mean: list = [0.485, 0.456, 0.406],
+        image_std: list = [0.229, 0.224, 0.225],
+    ):
+        """
+        Initialize the model.
+        
+        Args:
+            vit_model_name: Pretrained ViT model name
+            prediction_length: Length of time series to predict
+            context_length: Not used but kept for compatibility
+            feature_projection_dim: Dimension for CORAL projection (context vector size)
+            time_series_dim: Dimension of time series (usually 1 for univariate)
+            ts_model_dim: Hidden dimension for time series transformer
+            ts_num_heads: Number of attention heads
+            ts_num_layers: Number of decoder layers
+            ts_dim_feedforward: Feed-forward dimension
+            ts_dropout: Dropout rate
+            image_mean: Mean values for image normalization
+            image_std: Std values for image normalization
+        """
+        super().__init__()
+        
+        # Store configuration
+        self.vit_model_name = vit_model_name
+        self.prediction_length = prediction_length
+        self.context_length = context_length  # Kept for compatibility
+        self.time_series_dim = time_series_dim
+        self.feature_projection_dim = feature_projection_dim
+        self.ts_model_dim = ts_model_dim
+        
+        # Image normalization parameters
+        self.register_buffer('image_mean', torch.tensor(image_mean).view(1, 3, 1, 1))
+        self.register_buffer('image_std', torch.tensor(image_std).view(1, 3, 1, 1))
+        
+        # ViT Encoder
+        self.vit_encoder = ViTModel.from_pretrained(vit_model_name)
+        vit_hidden_size = self.vit_encoder.config.hidden_size
+        
+        # CORAL Domain Bridge
+        self.domain_bridge = CorrelationAlignment(
+            input_dim=vit_hidden_size,
+            output_dim=feature_projection_dim,
+            use_bias=False
+        )
+        
+        # Custom Transformer Decoder for Time Series Generation
+        self.ts_decoder = TimeSeriesTransformerDecoder(
+            context_dim=feature_projection_dim,
+            d_model=ts_model_dim,
+            nhead=ts_num_heads,
+            num_layers=ts_num_layers,
+            dim_feedforward=ts_dim_feedforward,
+            dropout=ts_dropout,
+            prediction_length=prediction_length,
+            time_series_dim=time_series_dim,
+        )
+    
+    def encode_image_to_context(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """
+        Convert image to context vector using ViT encoder and CORAL bridging.
+        
+        Args:
+            pixel_values: Image tensor of shape (batch_size, channels, height, width)
+            
+        Returns:
+            Context vector of shape (batch_size, feature_projection_dim)
+        """
+        # ViT encoding
+        vit_outputs = self.vit_encoder(pixel_values=pixel_values)
+        image_features = vit_outputs.last_hidden_state[:, 0]  # Use CLS token
+        
+        # CORAL domain bridging
+        context = self.domain_bridge(image_features)
+        
+        return context
+    
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        target_sequences: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Forward pass of the combined model.
+        
+        Args:
+            pixel_values: Input images (batch_size, channels, height, width)
+            target_sequences: Target time series for training (batch_size, prediction_length, time_series_dim)
+            
+        Returns:
+            Predicted time series of shape (batch_size, prediction_length, time_series_dim)
+        """
+        # Normalize pixel values
+        pixel_values = (pixel_values - self.image_mean) / self.image_std
+        
+        # Generate context vector from image
+        context = self.encode_image_to_context(pixel_values)
+        
+        # Generate time series from context using transformer decoder
+        predictions = self.ts_decoder(context, target_sequences)
+        
+        return predictions
+    
+    def generate(
+        self,
+        pixel_values: torch.Tensor,
+        num_samples: int = 1,
+        temperature: float = 1.0,
+        **generation_kwargs
+    ) -> torch.Tensor:
+        """
+        Generate time series predictions from images.
+        
+        Args:
+            pixel_values: Input images
+            num_samples: Number of samples to generate per image (currently only supports 1)
+            temperature: Temperature for sampling
+            **generation_kwargs: Additional generation parameters
+            
+        Returns:
+            Generated time series predictions
+        """
+        self.eval()
+        with torch.no_grad():
+            batch_size = pixel_values.size(0)
+            
+            # Normalize pixel values
+            pixel_values = (pixel_values - self.image_mean) / self.image_std
+            
+            # Generate context from image
+            context = self.encode_image_to_context(pixel_values)
+            
+            if num_samples == 1:
+                # Single sample generation
+                predictions = self.ts_decoder.generate(context, temperature)
+                return predictions
+            else:
+                # Multiple samples (generate multiple times)
+                samples = []
+                for _ in range(num_samples):
+                    sample = self.ts_decoder.generate(context, temperature)
+                    samples.append(sample)
+                
+                # Stack samples: (batch_size, num_samples, prediction_length, time_series_dim)
+                return torch.stack(samples, dim=1)
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the model architecture and parameters."""
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        
+        # Component-wise parameter counts
+        vit_params = sum(p.numel() for p in self.vit_encoder.parameters())
+        bridge_params = sum(p.numel() for p in self.domain_bridge.parameters())
+        decoder_params = sum(p.numel() for p in self.ts_decoder.parameters())
+        
+        return {
+            'total_parameters': total_params,
+            'trainable_parameters': trainable_params,
+            'component_parameters': {
+                'vit_encoder': vit_params,
+                'domain_bridge': bridge_params,
+                'ts_decoder': decoder_params,
+            },
+            'config': {
+                'vit_model_name': self.vit_model_name,
+                'prediction_length': self.prediction_length,
+                'time_series_dim': self.time_series_dim,
+                'feature_projection_dim': self.feature_projection_dim,
+                'ts_model_dim': self.ts_model_dim,
+            }
+        }
+    
+    def freeze_vit_encoder(self, freeze: bool = True):
+        """Freeze or unfreeze the ViT encoder parameters."""
+        for param in self.vit_encoder.parameters():
+            param.requires_grad = not freeze
+    
+    def freeze_ts_decoder(self, freeze: bool = True):
+        """Freeze or unfreeze the Transformer decoder parameters."""
+        for param in self.ts_decoder.parameters():
+            param.requires_grad = not freeze
+
+
+def create_model(
+    vit_model: str = "google/vit-base-patch16-224",
+    prediction_length: int = 24,
+    context_length: int = 48,
+    **kwargs
+) -> ViTToTimeSeriesModel:
+    """
+    Factory function to create ViTToTimeSeriesModel with common configurations.
+    
+    Args:
+        vit_model: ViT model variant to use
+        prediction_length: Length of predictions
+        context_length: Not used but kept for compatibility
+        **kwargs: Additional model arguments
+        
+    Returns:
+        Initialized model
+    """
+    return ViTToTimeSeriesModel(
+        vit_model_name=vit_model,
+        prediction_length=prediction_length,
+        context_length=context_length,
+        **kwargs
+    )
+
+
+if __name__ == "__main__":
+    # Test model creation and forward pass
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Create model
+    model = create_model(
+        prediction_length=24,
+        context_length=48,
+        feature_projection_dim=256,
+        ts_model_dim=256,
+        ts_num_heads=8,
+        ts_num_layers=4,
+    ).to(device)
+    
+    print("Model created successfully!")
+    
+    # Print model info
+    info = model.get_model_info()
+    print(f"Total parameters: {info['total_parameters']:,}")
+    print(f"CORAL bridge parameters: {info['component_parameters']['domain_bridge']:,}")
+    print(f"TS decoder parameters: {info['component_parameters']['ts_decoder']:,}")
+    
+    # Test forward pass
+    batch_size = 2
+    dummy_images = torch.randn(batch_size, 3, 224, 224, device=device)
+    dummy_targets = torch.randn(batch_size, 24, 1, device=device)
+    
+    # Forward pass
+    predictions = model(dummy_images, dummy_targets)
+    
+    print(f"\nForward pass results:")
+    print(f"Predictions shape: {predictions.shape}")
+    
+    # Test generation
+    generated = model.generate(dummy_images, num_samples=2)
+    print(f"\nGenerated samples shape: {generated.shape}")
+    
+    # Test loss computation
+    loss = F.mse_loss(predictions, dummy_targets)
+    print(f"Loss: {loss.item():.6f}")
+    
+    print("\nModel test completed successfully!")
