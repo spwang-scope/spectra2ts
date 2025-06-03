@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import ViTModel
+from transformers import ViTConfig
 from typing import Optional, Dict, Any, Tuple
 import numpy as np
 import math
@@ -304,10 +305,12 @@ class ViTToTimeSeriesModel(nn.Module):
         self.register_buffer('image_std', torch.tensor(image_std).view(1, 3, 1, 1))
         
         # ViT Encoder
-        self.vit_encoder = ViTModel.from_pretrained(vit_model_name)
-        vit_hidden_size = self.vit_encoder.config.hidden_size
+        config = ViTConfig.from_pretrained("google/vit-base-patch16-224-in21k")
+        config.patch_size = 4
+        self.vit_encoder = ViTModel(config=config)
         
         # CORAL Domain Bridge
+        vit_hidden_size = self.vit_encoder.config.hidden_size
         self.domain_bridge = CorrelationAlignment(
             input_dim=vit_hidden_size,
             output_dim=feature_projection_dim,
@@ -476,47 +479,3 @@ def create_model(
         context_length=context_length,
         **kwargs
     )
-
-
-if __name__ == "__main__":
-    # Test model creation and forward pass
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Create model
-    model = create_model(
-        prediction_length=24,
-        context_length=48,
-        feature_projection_dim=256,
-        ts_model_dim=256,
-        ts_num_heads=8,
-        ts_num_layers=4,
-    ).to(device)
-    
-    print("Model created successfully!")
-    
-    # Print model info
-    info = model.get_model_info()
-    print(f"Total parameters: {info['total_parameters']:,}")
-    print(f"CORAL bridge parameters: {info['component_parameters']['domain_bridge']:,}")
-    print(f"TS decoder parameters: {info['component_parameters']['ts_decoder']:,}")
-    
-    # Test forward pass
-    batch_size = 2
-    dummy_images = torch.randn(batch_size, 3, 224, 224, device=device)
-    dummy_targets = torch.randn(batch_size, 24, 1, device=device)
-    
-    # Forward pass
-    predictions = model(dummy_images, dummy_targets)
-    
-    print(f"\nForward pass results:")
-    print(f"Predictions shape: {predictions.shape}")
-    
-    # Test generation
-    generated = model.generate(dummy_images, num_samples=2)
-    print(f"\nGenerated samples shape: {generated.shape}")
-    
-    # Test loss computation
-    loss = F.mse_loss(predictions, dummy_targets)
-    print(f"Loss: {loss.item():.6f}")
-    
-    print("\nModel test completed successfully!")

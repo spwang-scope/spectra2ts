@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional
 import logging
 import glob
 import warnings
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -52,6 +53,7 @@ def setup_logging(log_dir: str = "./logs", log_level: str = "INFO"):
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="ViT-to-TimeSeries Model Training")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Model arguments
     parser.add_argument("--vit_model", type=str, default="google/vit-base-patch16-224",
@@ -107,7 +109,7 @@ def parse_arguments():
     # Experiment arguments
     parser.add_argument("--experiment_name", type=str, default="vit_timeseries",
                        help="Name of the experiment")
-    parser.add_argument("--output_dir", type=str, default="./outputs",
+    parser.add_argument("--output_dir", type=str, default=f"./outputs_{timestamp}",
                        help="Output directory for models and logs")
     parser.add_argument("--save_interval", type=int, default=10,
                        help="Save model every N epochs")
