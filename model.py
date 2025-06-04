@@ -393,6 +393,7 @@ class ViTToTimeSeriesModel(nn.Module):
         Returns:
             Generated time series predictions
         """
+        
         self.eval()
         with torch.no_grad():
             batch_size = pixel_values.size(0)
@@ -417,33 +418,6 @@ class ViTToTimeSeriesModel(nn.Module):
                 # Stack samples: (batch_size, num_samples, prediction_length, time_series_dim)
                 return torch.stack(samples, dim=1)
     
-    def get_model_info(self) -> Dict[str, Any]:
-        """Get information about the model architecture and parameters."""
-        total_params = sum(p.numel() for p in self.parameters())
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        
-        # Component-wise parameter counts
-        vit_params = sum(p.numel() for p in self.vit_encoder.parameters())
-        bridge_params = sum(p.numel() for p in self.domain_bridge.parameters())
-        decoder_params = sum(p.numel() for p in self.ts_decoder.parameters())
-        
-        return {
-            'total_parameters': total_params,
-            'trainable_parameters': trainable_params,
-            'component_parameters': {
-                'vit_encoder': vit_params,
-                'domain_bridge': bridge_params,
-                'ts_decoder': decoder_params,
-            },
-            'config': {
-                'vit_model_name': self.vit_model_name,
-                'prediction_length': self.prediction_length,
-                'time_series_dim': self.time_series_dim,
-                'feature_projection_dim': self.feature_projection_dim,
-                'ts_model_dim': self.ts_model_dim,
-            }
-        }
-    
     def freeze_vit_encoder(self, freeze: bool = True):
         """Freeze or unfreeze the ViT encoder parameters."""
         for param in self.vit_encoder.parameters():
@@ -457,8 +431,8 @@ class ViTToTimeSeriesModel(nn.Module):
 
 def create_model(
     vit_model: str = "google/vit-base-patch16-224",
-    prediction_length: int = 24,
-    context_length: int = 48,
+    prediction_length: int = 96,
+    context_length: int = 96,
     **kwargs
 ) -> ViTToTimeSeriesModel:
     """

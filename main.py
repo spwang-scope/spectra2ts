@@ -93,7 +93,9 @@ def parse_arguments():
                        help="Learning rate scheduler")
     
     # Data arguments
-    parser.add_argument("--data_dir", type=str, default="data/",
+    parser.add_argument("--data_dir", type=str, default="../dataset/ETT-small",
+                       help="Directory containing dataset")
+    parser.add_argument("--data_filename", type=str, default="ETTh1.csv",
                        help="Directory containing dataset")
     parser.add_argument("--image_size", type=int, default=224,
                        help="Size to resize images")
@@ -592,6 +594,7 @@ def test(args):
 
 
 def inference(args):
+    '''
     """Run inference on new data."""
     # Setup logging
     logger = setup_logging(args.output_dir, args.log_level)
@@ -616,10 +619,6 @@ def inference(args):
         ts_dropout=args.ts_dropout,
     ).to(device)
     logger.info("Model created successfully")
-    
-    # Print model info for debugging
-    model_info = model.get_model_info()
-    logger.info(f"Model parameters: {model_info['total_parameters']:,}")
     
     # Load checkpoint if provided
     if args.checkpoint_path and not args.no_checkpoint:
@@ -794,7 +793,9 @@ def inference(args):
                 json.dump(summary, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save failure summary: {str(e)}")
-
+    '''
+    print("pass")
+    pass
 
 def main():
     """Main entry point."""
