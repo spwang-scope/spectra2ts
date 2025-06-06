@@ -4,7 +4,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import signal
-from skimage.transform import resize
 from sklearn.preprocessing import StandardScaler
 
 def get_STFT_spectra(np_array_data, nperseg = 32, noverlap = 28) -> np.array:

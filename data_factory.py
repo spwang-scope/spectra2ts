@@ -17,7 +17,7 @@ def data_provider(args, flag):
         root_path=args.data_dir,
         data_path=args.data_filename,
         flag=flag,
-        size=[args.seq_len, args.pred_len],
+        size=[args.context_length, args.prediction_length],
         target=args.target
     )
 

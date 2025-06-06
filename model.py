@@ -13,6 +13,8 @@ from transformers import ViTConfig
 from typing import Optional, Dict, Any, Tuple
 import numpy as np
 import math
+from get_stft_spectra import get_STFT_spectra
+from util import pad_to_multiple_of_4_center_bottom, pad_to_64_center_bottom
 
 from bridge import CorrelationAlignment
 
@@ -39,7 +41,7 @@ class PositionalEncoding(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Tensor of shape (seq_len, batch_size, d_model)
+            x: Tensor of shape (context_length, batch_size, d_model)
         """
         return x + self.pe[:x.size(0), :]
 
@@ -86,7 +88,7 @@ class TimeSeriesTransformerDecoder(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             activation='gelu',
-            batch_first=False  # Use (seq_len, batch, features) format
+            batch_first=False  # Use (context_length, batch, features) format
         )
         
         self.transformer_decoder = nn.TransformerDecoder(
@@ -133,7 +135,7 @@ class TimeSeriesTransformerDecoder(nn.Module):
         
         Args:
             context: Context vector from image encoding (batch_size, context_dim)
-            target_sequence: Target time series for training (batch_size, seq_len, time_series_dim)
+            target_sequence: Target time series for training (batch_size, context_length, time_series_dim)
             
         Returns:
             Predicted time series (batch_size, prediction_length, time_series_dim)
@@ -150,20 +152,20 @@ class TimeSeriesTransformerDecoder(nn.Module):
         
         if self.training and target_sequence is not None:
             # Training mode with teacher forcing
-            seq_len = target_sequence.size(1)
+            context_length = target_sequence.size(1)
             
             # Create input sequence by prepending start token
             start_tokens = self.start_token.expand(batch_size, 1, self.time_series_dim)
-            if seq_len > 1:
+            if context_length > 1:
                 # Use shifted target sequence (exclude last token for input)
                 decoder_input = torch.cat([start_tokens, target_sequence[:, :-1, :]], dim=1)
             else:
                 decoder_input = start_tokens
             
             # Embed decoder input
-            embedded_input = self.value_embedding(decoder_input)  # (batch_size, seq_len, d_model)
+            embedded_input = self.value_embedding(decoder_input)  # (batch_size, context_length, d_model)
             
-            # Transpose for transformer: (seq_len, batch_size, d_model)
+            # Transpose for transformer: (context_length, batch_size, d_model)
             embedded_input = embedded_input.transpose(0, 1)
             
             # Add positional encoding
@@ -177,12 +179,12 @@ class TimeSeriesTransformerDecoder(nn.Module):
                 tgt=embedded_input,
                 memory=memory,
                 tgt_mask=tgt_mask
-            )  # (seq_len, batch_size, d_model)
+            )  # (context_length, batch_size, d_model)
             
             # Project to output dimension
-            predictions = self.output_projection(decoder_output)  # (seq_len, batch_size, time_series_dim)
+            predictions = self.output_projection(decoder_output)  # (context_length, batch_size, time_series_dim)
             
-            # Transpose back to batch first: (batch_size, seq_len, time_series_dim)
+            # Transpose back to batch first: (batch_size, context_length, time_series_dim)
             predictions = predictions.transpose(0, 1)
             
             return predictions
@@ -221,8 +223,8 @@ class TimeSeriesTransformerDecoder(nn.Module):
             embedded_input = self.pos_encoding(embedded_input)
             
             # Create causal mask
-            seq_len = embedded_input.size(0)
-            tgt_mask = self._generate_square_subsequent_mask(seq_len, device)
+            context_length = embedded_input.size(0)
+            tgt_mask = self._generate_square_subsequent_mask(context_length, device)
             
             # Pass through transformer decoder
             decoder_output = self.transformer_decoder(
@@ -261,6 +263,8 @@ class ViTToTimeSeriesModel(nn.Module):
     def __init__(
         self,
         vit_model_name: str = "google/vit-base-patch16-224",
+        image_size: int = 64,
+        num_channels: int = 3,
         prediction_length: int = 24,
         context_length: int = 48,  # Not used but kept for compatibility
         feature_projection_dim: int = 256,
@@ -306,7 +310,9 @@ class ViTToTimeSeriesModel(nn.Module):
         
         # ViT Encoder
         config = ViTConfig.from_pretrained("google/vit-base-patch16-224-in21k")
+        config.image_size = image_size
         config.patch_size = 4
+        config.num_channels = num_channels
         self.vit_encoder = ViTModel(config=config)
         
         # CORAL Domain Bridge
@@ -353,21 +359,22 @@ class ViTToTimeSeriesModel(nn.Module):
         pixel_values: torch.Tensor,
         target_sequences: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Forward pass of the combined model.
         
-        Args:
-            pixel_values: Input images (batch_size, channels, height, width)
-            target_sequences: Target time series for training (batch_size, prediction_length, time_series_dim)
-            
-        Returns:
-            Predicted time series of shape (batch_size, prediction_length, time_series_dim)
-        """
-        # Normalize pixel values
-        pixel_values = (pixel_values - self.image_mean) / self.image_std
+        device = next(self.parameters()).device
         
-        # Generate context vector from image
-        context = self.encode_image_to_context(pixel_values)
+        # Compute Spectra of items by items in the batch
+        # They do not have gradient flowing through
+        spectra_list = []
+        for item in pixel_values.numpy():
+            spectra = torch.from_numpy(get_STFT_spectra(item))
+            spectra = pad_to_64_center_bottom(spectra).to(device)
+            spectra_list.append(spectra)
+
+        # Stack back into batch tensor
+        spectra_tensor = torch.stack(spectra_list, dim=0)
+        
+        # Generate context vector from spectrograms
+        context = self.encode_image_to_context(spectra_tensor)
         
         # Generate time series from context using transformer decoder
         predictions = self.ts_decoder(context, target_sequences)
