@@ -1,5 +1,8 @@
 import torch
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import numpy as np
+import os
 
 def pad_to_multiple_of_4_center_bottom(input_tensor: torch.Tensor) -> torch.Tensor:
     """
@@ -58,3 +61,42 @@ def pad_to_64_center_bottom(input_tensor: torch.Tensor) -> torch.Tensor:
     padded_tensor = F.pad(input_tensor, (pad_left, pad_right, pad_top, pad_bottom), mode='constant', value=0)
 
     return padded_tensor
+
+def visual(batch_x, batch_y, pred, save_path):
+    """
+    Visualizes the context, ground truth, and prediction for a time series batch.
+    
+    Args:
+        batch_x (np.ndarray): Context sequence of shape (seq_len,)
+        batch_y (np.ndarray): Ground truth of prediction horizon (same length as pred)
+        pred (np.ndarray): Model prediction (same shape as batch_y)
+        save_path (str): Output file path for saving the figure
+    """
+    # Ensure all are 1D arrays
+    batch_x = batch_x.flatten()
+    batch_y = batch_y.flatten()
+    pred = pred.flatten()
+
+    context_len = len(batch_x)
+    horizon_len = len(batch_y)
+
+    # Construct x-axis timeline
+    x_context = np.arange(context_len)
+    x_future = np.arange(context_len, context_len + horizon_len)
+
+    # Plot
+    plt.figure(figsize=(10, 4))
+    plt.plot(x_context, batch_x, color='blue', label='Context')
+    plt.plot(x_future, batch_y, color='blue', linestyle='--', label='Ground Truth')
+    plt.plot(x_future, pred, color='red', linestyle='--', label='Prediction')
+
+    plt.xlabel('Time Step')
+    plt.ylabel('Value')
+    plt.title('Time Series Forecasting')
+    plt.legend()
+    plt.tight_layout()
+
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path)
+    plt.close()

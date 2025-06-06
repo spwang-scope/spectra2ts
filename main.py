@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 from data_factory import data_provider
 from metrics import metric
+from util import visual
 
 # Check transformers version compatibility
 try:
@@ -87,7 +88,7 @@ def parse_arguments():
                        help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
                        help="Learning rate")
-    parser.add_argument("--num_epochs", type=int, default=5000,
+    parser.add_argument("--num_epochs", type=int, default=2000,
                        help="Number of training epochs")
     parser.add_argument("--weight_decay", type=float, default=1e-5,
                        help="Weight decay for optimizer")
@@ -118,7 +119,7 @@ def parse_arguments():
                        help="Name of the experiment")
     parser.add_argument("--output_dir", type=str, default=f"./outputs_{timestamp}",
                        help="Output directory for models and logs")
-    parser.add_argument("--save_interval", type=int, default=10,
+    parser.add_argument("--save_interval", type=int, default=50,
                        help="Save model every N epochs")
     parser.add_argument("--eval_interval", type=int, default=5,
                        help="Evaluate model every N epochs")
@@ -565,6 +566,8 @@ def test(args, peeking=False, model=None):
             groundTruth.append(batch_y.cpu().numpy())
 
             loss = criterion(pred, batch_y)
+
+            visual(batch_x, batch_y, pred, os.path.join(args.output_dir, 'batch{i}','.png'))
             
             total_loss.append(loss.cpu().numpy())
             
