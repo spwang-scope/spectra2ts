@@ -166,7 +166,7 @@ def parse_arguments():
 def get_device(device_arg: str) -> torch.device:
     """Get the appropriate device."""
     if device_arg == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     else:
         return torch.device(device_arg)
 
@@ -567,7 +567,7 @@ def test(args, peeking=False, model=None):
 
             loss = criterion(pred, batch_y)
 
-            visual(batch_x, batch_y, pred, os.path.join(args.output_dir, 'batch{i}','.png'))
+            visual(batch_x.cpu().numpy(), batch_y.cpu().numpy(), pred.cpu().numpy(), os.path.join(args.output_dir, 'batch{i}','.png'))
             
             total_loss.append(loss.cpu().numpy())
             
