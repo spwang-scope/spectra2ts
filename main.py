@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional
 import logging
 import glob
 import warnings
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -19,6 +20,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
+import pandas as pd
+from data_factory import data_provider
+from metrics import metric
 
 # Check transformers version compatibility
 try:
@@ -52,6 +56,7 @@ def setup_logging(log_dir: str = "./logs", log_level: str = "INFO"):
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="ViT-to-TimeSeries Model Training")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Model arguments
     parser.add_argument("--vit_model", type=str, default="google/vit-base-patch16-224",
@@ -74,13 +79,15 @@ def parse_arguments():
                        help="Feed-forward dimension")
     parser.add_argument("--ts_dropout", type=float, default=0.1,
                        help="Dropout rate for transformer")
+    parser.add_argument('--target', type=str, default='OT',
+                       help='target feature in S or MS task')
     
     # Training arguments
     parser.add_argument("--batch_size", type=int, default=8,
                        help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
                        help="Learning rate")
-    parser.add_argument("--num_epochs", type=int, default=50,
+    parser.add_argument("--num_epochs", type=int, default=5000,
                        help="Number of training epochs")
     parser.add_argument("--weight_decay", type=float, default=1e-5,
                        help="Weight decay for optimizer")
@@ -91,23 +98,25 @@ def parse_arguments():
                        help="Learning rate scheduler")
     
     # Data arguments
-    parser.add_argument("--data_dir", type=str, default="data/",
+    parser.add_argument("--data_dir", type=str, default="../dataset/ETT-small",
                        help="Directory containing dataset")
-    parser.add_argument("--image_size", type=int, default=224,
-                       help="Size to resize images")
+    parser.add_argument("--data_filename", type=str, default="ETTh1.csv",
+                       help="Directory containing dataset")
+    parser.add_argument("--image_size", type=int, default=64,
+                       help="Size of spectrogram")
     parser.add_argument("--num_workers", type=int, default=4,
                        help="Number of data loading workers")
     parser.add_argument("--augment", action="store_true",
                        help="Apply data augmentation")
     parser.add_argument("--use_dummy_data", action="store_true",
                        help="Use dummy data for testing")
-    parser.add_argument("--num_dummy_samples", type=int, default=500,
+    parser.add_argument("--num_dummy_samples", type=int, default=50,
                        help="Number of dummy samples to create")
     
     # Experiment arguments
     parser.add_argument("--experiment_name", type=str, default="vit_timeseries",
                        help="Name of the experiment")
-    parser.add_argument("--output_dir", type=str, default="./outputs",
+    parser.add_argument("--output_dir", type=str, default=f"./outputs_{timestamp}",
                        help="Output directory for models and logs")
     parser.add_argument("--save_interval", type=int, default=10,
                        help="Save model every N epochs")
@@ -140,7 +149,17 @@ def parse_arguments():
     parser.add_argument("--tensorboard", action="store_true",
                        help="Use tensorboard logging")
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    
+    def get_df_channel():
+        df = pd.read_csv(os.path.join(args.data_dir,
+                                          args.data_filename))
+        return df.shape[1]-1  # number of columns, exclude Datetime
+    
+    # Determine number of data channels since we want to construct model according to it
+    args.num_channels = get_df_channel()
+    
+    return args
 
 
 def get_device(device_arg: str) -> torch.device:
@@ -264,28 +283,24 @@ def train_epoch(
     total_loss = 0.0
     total_samples = 0
     
-    for batch_idx, batch in enumerate(train_loader):
-        # Move data to device
-        pixel_values = batch['pixel_values'].to(device)
-        target_sequences = batch['target_sequences'].to(device)
-        
+    for batch_idx, (batch_x, batch_y) in enumerate(train_loader):        
         # Forward pass
         optimizer.zero_grad()
         
         logger.debug(f"Computing forward pass for batch {batch_idx}")
-        predictions = model(pixel_values, target_sequences)
+        predictions = model(batch_x)
         
         # Ensure predictions and targets have same shape
-        if predictions.shape != target_sequences.shape:
-            logger.warning(f"Shape mismatch: predictions {predictions.shape} vs targets {target_sequences.shape}")
+        if predictions.shape != batch_y.shape:
+            logger.warning(f"Shape mismatch: predictions {predictions.shape} vs targets {batch_y.shape}")
             # Try to align shapes
-            if target_sequences.dim() == 2 and predictions.dim() == 3:
-                target_sequences = target_sequences.unsqueeze(-1)
-            elif target_sequences.dim() == 3 and predictions.dim() == 2:
+            if batch_y.dim() == 2 and predictions.dim() == 3:
+                batch_y = batch_y.unsqueeze(-1)
+            elif batch_y.dim() == 3 and predictions.dim() == 2:
                 predictions = predictions.unsqueeze(-1)
         
         # Compute loss
-        loss = nn.functional.mse_loss(predictions, target_sequences)
+        loss = nn.functional.mse_loss(predictions, batch_y)
         
         # Check for NaN or inf losses
         if torch.isnan(loss) or torch.isinf(loss):
@@ -301,7 +316,7 @@ def train_epoch(
         optimizer.step()
         
         # Update metrics
-        batch_size = pixel_values.size(0)
+        batch_size = batch_x.size(0)
         total_loss += loss.item() * batch_size
         total_samples += batch_size
         
@@ -325,73 +340,6 @@ def train_epoch(
     
     return {
         'train_loss': avg_loss
-    }
-
-
-def evaluate(
-    model: ViTToTimeSeriesModel,
-    val_loader: DataLoader,
-    device: torch.device,
-    epoch: int,
-    logger,
-    writer: Optional[SummaryWriter] = None
-) -> Dict[str, float]:
-    """Evaluate the model."""
-    model.eval()
-    
-    total_loss = 0.0
-    total_mae = 0.0
-    total_samples = 0
-    
-    logger.info("Starting model evaluation...")
-    
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(val_loader):
-            pixel_values = batch['pixel_values'].to(device)
-            target_sequences = batch['target_sequences'].to(device)
-            
-            # Forward pass (inference mode)
-            logger.debug(f"Processing validation batch {batch_idx}")
-            predictions = model(pixel_values)
-            
-            # Ensure predictions and targets have same shape
-            if predictions.shape != target_sequences.shape:
-                if target_sequences.dim() == 2 and predictions.dim() == 3:
-                    target_sequences = target_sequences.unsqueeze(-1)
-                elif target_sequences.dim() == 3 and predictions.dim() == 2:
-                    predictions = predictions.unsqueeze(-1)
-            
-            # Calculate metrics
-            loss = nn.functional.mse_loss(predictions, target_sequences)
-            mae = torch.mean(torch.abs(predictions - target_sequences))
-            
-            # Check for valid metrics
-            if torch.isnan(loss) or torch.isinf(loss) or torch.isnan(mae) or torch.isinf(mae):
-                logger.warning(f"Invalid metrics in validation batch {batch_idx}, skipping")
-                continue
-            
-            batch_size = pixel_values.size(0)
-            total_loss += loss.item() * batch_size
-            total_mae += mae.item() * batch_size
-            total_samples += batch_size
-    
-    if total_samples == 0:
-        logger.error("No valid validation batches processed!")
-        return {'val_loss': float('inf'), 'val_mae': float('inf')}
-    
-    avg_loss = total_loss / total_samples
-    avg_mae = total_mae / total_samples
-    
-    # Log to tensorboard
-    if writer:
-        writer.add_scalar('Val/Loss', avg_loss, epoch)
-        writer.add_scalar('Val/MAE', avg_mae, epoch)
-    
-    logger.info(f'Validation - Loss: {avg_loss:.6f}, MAE: {avg_mae:.6f}')
-    
-    return {
-        'val_loss': avg_loss,
-        'val_mae': avg_mae
     }
 
 
@@ -445,13 +393,16 @@ def train(args):
     os.makedirs(experiment_dir, exist_ok=True)
     
     # Create data loaders
-    train_loader, val_loader = create_data_loaders(args, logger)
-    logger.info(f"Created data loaders: {len(train_loader)} train, {len(val_loader)} val batches")
+    train_dataset, train_loader = data_provider(args, flag='test')
+    test_dataset, test_loader = data_provider(args, flag='test')
+    logger.info(f"Created data loaders: {len(train_loader)} trains")
     
     # Create model
     logger.info("Creating ViT-to-TimeSeries model...")
     model = create_model(
         vit_model=args.vit_model,
+        image_size=args.image_size,
+        num_channels=args.num_channels,
         prediction_length=args.prediction_length,
         context_length=args.context_length,
         feature_projection_dim=args.feature_projection_dim,
@@ -464,9 +415,6 @@ def train(args):
     ).to(device)
     logger.info("Model created successfully")
     
-    # Print model info
-    model_info = model.get_model_info()
-    logger.info(f"Model parameters: {model_info['total_parameters']:,}")
     
     # Apply freezing if requested
     if args.freeze_vit:
@@ -481,7 +429,8 @@ def train(args):
     
     # Create optimizer and scheduler
     logger.info("Creating optimizer and scheduler...")
-    optimizer, scheduler = create_optimizer_and_scheduler(model, args)
+    optimizer, _ = create_optimizer_and_scheduler(model, args)
+    criterion = nn.MSELoss()
     
     # Setup tensorboard
     writer = None
@@ -490,7 +439,6 @@ def train(args):
         writer = SummaryWriter(os.path.join(experiment_dir, 'tensorboard'))
     
     # Training loop
-    best_val_loss = float('inf')
     start_epoch = 0
     
     if args.checkpoint_path:
@@ -498,45 +446,51 @@ def train(args):
         start_epoch = load_checkpoint(args.checkpoint_path, model, optimizer, logger)
     
     logger.info(f"Starting training from epoch {start_epoch}")
-    logger.info(f"Model info: {model_info}")
     logger.info(f"Device: {device}")
     logger.info(f"Using custom Transformer decoder with transformers v{transformers_version}")
     
     for epoch in range(start_epoch, args.num_epochs):
         logger.info(f"Starting epoch {epoch}/{args.num_epochs}")
         
-        # Train
-        train_metrics = train_epoch(model, train_loader, optimizer, device, epoch, args, logger, writer)
+        iter_count = 0
+        train_loss = []
+
+        model.train()
+        epoch_time = time.time()
+        for i, (batch_x, batch_y) in enumerate(train_loader):
+            iter_count += 1
+            optimizer.zero_grad()
+            batch_x = batch_x.float()
+            batch_y = batch_y.float()
+
+            outputs = model(batch_x)
+
+            f_dim = -1 # always select last feature (OT) for calculating loss?
+            outputs = outputs[:, -args.prediction_length:, f_dim:].to(device)
+            batch_y = batch_y[:, -args.prediction_length:, f_dim:].to(device)
+            loss = criterion(outputs, batch_y)
+            train_loss.append(loss.item())
+
+            if (i + 1) % 100 == 0:
+                logger.info("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
+                iter_count = 0
+
+                loss.backward()
+                optimizer.step()
+
+        logger.info("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
+        train_loss = np.average(train_loss)
+        test_loss = test(args, peeking=True, model=model)    # Peek testing result
+
+        model.train()   # recover from model.eval() in peeking
+
+        logger.info("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Test Loss: {3:.7f}".format(
+            epoch + 1, -1, train_loss, test_loss))
         
-        # Evaluate
-        val_metrics = {}
-        if epoch % args.eval_interval == 0:
-            val_metrics = evaluate(model, val_loader, device, epoch, logger, writer)
-        
-        # Update learning rate
-        if scheduler:
-            scheduler.step()
-        
-        # Log metrics
-        if writer:
-            writer.add_scalar('Train/Loss', train_metrics['train_loss'], epoch)
-            
-            current_lr = optimizer.param_groups[0]['lr']
-            writer.add_scalar('Train/LearningRate', current_lr, epoch)
-        
-        # Save checkpoint
         if epoch % args.save_interval == 0:
             logger.info(f"Saving checkpoint for epoch {epoch}...")
-            metrics = {**train_metrics, **val_metrics}
             checkpoint_path = os.path.join(experiment_dir, f'checkpoint_epoch_{epoch}.pt')
-            save_checkpoint(model, optimizer, epoch, metrics, checkpoint_path, logger)
-            
-            # Save best model
-            if val_metrics and val_metrics['val_loss'] < best_val_loss:
-                best_val_loss = val_metrics['val_loss']
-                best_path = os.path.join(experiment_dir, 'best_model.pt')
-                logger.info(f"New best model with validation loss: {best_val_loss:.6f}")
-                save_checkpoint(model, optimizer, epoch, metrics, best_path, logger)
+            save_checkpoint(model, optimizer, epoch, {}, checkpoint_path, logger)
     
     # Final save
     logger.info("Saving final model...")
@@ -549,47 +503,93 @@ def train(args):
     logger.info("Training completed!")
 
 
-def test(args):
+def test(args, peeking=False, model=None):
+
     """Test the model."""
     # Setup logging
     logger = setup_logging(args.output_dir, args.log_level)
     
     device = get_device(args.device)
     
-    if not args.checkpoint_path:
+    if not args.checkpoint_path and not peeking:
         raise ValueError("checkpoint_path must be specified for testing")
     
     # Create data loaders
-    _, val_loader = create_data_loaders(args, logger)
+    test_data, test_loader = data_provider(args, flag='test')
     
     # Create and load model
-    logger.info("Creating model for testing...")
-    model = create_model(
-        vit_model=args.vit_model,
-        prediction_length=args.prediction_length,
-        context_length=args.context_length,
-        feature_projection_dim=args.feature_projection_dim,
-        time_series_dim=args.time_series_dim,
-        ts_model_dim=args.ts_model_dim,
-        ts_num_heads=args.ts_num_heads,
-        ts_num_layers=args.ts_num_layers,
-        ts_dim_feedforward=args.ts_dim_feedforward,
-        ts_dropout=args.ts_dropout,
-    ).to(device)
-    logger.info("Model created successfully")
+    if not peeking:
+        logger.info("Creating model for testing...")
+        model = create_model(
+            vit_model=args.vit_model,
+            image_size=args.image_size,
+            num_channels=args.num_channels,
+            prediction_length=args.prediction_length,
+            context_length=args.context_length,
+            feature_projection_dim=args.feature_projection_dim,
+            time_series_dim=args.time_series_dim,
+            ts_model_dim=args.ts_model_dim,
+            ts_num_heads=args.ts_num_heads,
+            ts_num_layers=args.ts_num_layers,
+            ts_dim_feedforward=args.ts_dim_feedforward,
+            ts_dropout=args.ts_dropout,
+        ).to(device)
+        logger.info("Model created successfully") 
+        load_checkpoint(args.checkpoint_path, model, logger=logger)
+    else:   # peeking
+        assert(model is not None)
+
+    predictions = list()
+    groundTruth = list()
+
+    criterion = nn.MSELoss()
     
-    load_checkpoint(args.checkpoint_path, model, logger=logger)
+    total_loss = []
+    model.eval()
+    with torch.no_grad():
+        for i, (batch_x, batch_y) in enumerate(test_loader):
+            batch_x = batch_x.float()
+            batch_y = batch_y.float().to(device)
+            
+            # Generate predictions
+            logger.debug(f"Generating predictions for batch {i}...")
+            pred = model(batch_x)
+            logger.debug(f"Generated predictions shape: {pred.shape}")
+            
+            # Validate predictions
+            if torch.isnan(pred).any() or torch.isinf(pred).any():
+                logger.warning(f"Invalid predictions in batch {i}, using zeros")
+                pred = torch.zeros_like(pred)
+            
+            predictions.append(pred.cpu().numpy())
+            groundTruth.append(batch_y.cpu().numpy())
+
+            loss = criterion(pred, batch_y)
+            
+            total_loss.append(loss.cpu().numpy())
+            
+    avg_loss = np.average(total_loss)
+
+
+    preds = np.concatenate(predictions, axis=0)
+    trues = np.concatenate(groundTruth, axis=0)
+
+    mae, mse, rmse, mape, mspe = metric(preds, trues)
+    print('mse:{}, mae:{}'.format(mse, mae))
+    f = open("result_long_term_forecast.txt", 'a')
+    f.write('mse:{}, mae:{}'.format(mse, mae))
+    f.write('\n')
+    f.write('\n')
+    f.close()
+
+    np.save(os.path.join(args.output_dir, 'pred.npy'), preds)
+    np.save(os.path.join(args.output_dir, 'true.npy'), trues)
     
-    # Evaluate
-    logger.info("Starting evaluation...")
-    metrics = evaluate(model, val_loader, device, 0, logger)
-    
-    logger.info("Test Results:")
-    for key, value in metrics.items():
-        logger.info(f"  {key}: {value:.6f}")
+    return avg_loss
 
 
 def inference(args):
+    
     """Run inference on new data."""
     # Setup logging
     logger = setup_logging(args.output_dir, args.log_level)
@@ -603,6 +603,8 @@ def inference(args):
     logger.info("Creating model for inference...")
     model = create_model(
         vit_model=args.vit_model,
+        image_size=args.image_size,
+        num_channels=args.num_channels,
         prediction_length=args.prediction_length,
         context_length=args.context_length,
         feature_projection_dim=args.feature_projection_dim,
@@ -615,10 +617,6 @@ def inference(args):
     ).to(device)
     logger.info("Model created successfully")
     
-    # Print model info for debugging
-    model_info = model.get_model_info()
-    logger.info(f"Model parameters: {model_info['total_parameters']:,}")
-    
     # Load checkpoint if provided
     if args.checkpoint_path and not args.no_checkpoint:
         try:
@@ -629,35 +627,15 @@ def inference(args):
             logger.info("Continuing with randomly initialized model")
     else:
         logger.info("Using randomly initialized model (trial run)")
+
+
+    data_set, data_loader = data_provider(args, flag='test')
     
     model.eval()
     
     # Create output directory for predictions
     inference_dir = os.path.join(args.output_dir, "inference_results")
     os.makedirs(inference_dir, exist_ok=True)
-    
-    # Get image paths from data directory
-    if os.path.exists(args.data_dir):
-        logger.info(f"Searching for images in {args.data_dir}...")
-        image_paths = get_image_paths_from_dir(args.data_dir)
-        logger.info(f"Found {len(image_paths)} images in {args.data_dir}")
-        
-        if len(image_paths) == 0:
-            logger.warning(f"No images found in {args.data_dir}. Creating dummy data for testing.")
-            # Create dummy data for testing
-            image_paths, _ = create_dummy_dataset(
-                num_samples=10,
-                prediction_length=args.prediction_length,
-                save_dir=os.path.join(args.output_dir, "inference_images")
-            )
-    else:
-        logger.warning(f"Data directory {args.data_dir} not found. Creating dummy data for testing.")
-        # Create dummy data for testing
-        image_paths, _ = create_dummy_dataset(
-            num_samples=10,
-            prediction_length=args.prediction_length,
-            save_dir=os.path.join(args.output_dir, "inference_images")
-        )
     
     # Run inference on images
     predictions = []
@@ -666,61 +644,28 @@ def inference(args):
     
     logger.info("Starting inference...")
     
-    # Process images in batches
-    for i in range(0, len(image_paths), args.batch_size):
-        batch_paths = image_paths[i:i+args.batch_size]
-        batch_num = i // args.batch_size + 1
-        
-        logger.info(f"Processing batch {batch_num}/{(len(image_paths) + args.batch_size - 1) // args.batch_size}")
-        
-        # Create dummy time series data for batch (required by dataset)
-        dummy_ts = [np.zeros(args.prediction_length) for _ in batch_paths]
-        
-        # Create dataloader for this batch
-        try:
-            logger.debug(f"Creating dataloader for batch {batch_num} with {len(batch_paths)} images")
-            batch_loader = create_dataloader(
-                image_paths=batch_paths,
-                time_series_data=dummy_ts,
-                batch_size=len(batch_paths),
-                shuffle=False,
-                num_workers=0,  # Use 0 workers for small batches
-                augment=False,
-                prediction_length=args.prediction_length,
-                image_size=args.image_size,
-            )
-            logger.debug(f"Dataloader created successfully for batch {batch_num}")
-        except Exception as e:
-            logger.error(f"Failed to create dataloader for batch {batch_num}: {str(e)}")
-            failed_batch_names = [os.path.basename(path) for path in batch_paths]
-            failed_images.extend(failed_batch_names)
-            continue
-        
-        # Process batch
-        with torch.no_grad():
-            for batch in batch_loader:
-                logger.debug(f"Processing batch {batch_num} - pixel_values shape: {batch['pixel_values'].shape}")
-                pixel_values = batch['pixel_values'].to(device)
-                
-                # Generate predictions
-                logger.debug(f"Generating predictions for batch {batch_num}...")
-                pred = model.generate(pixel_values, num_samples=1)
-                logger.debug(f"Generated predictions shape: {pred.shape}")
-                
-                # Validate predictions
-                if torch.isnan(pred).any() or torch.isinf(pred).any():
-                    logger.warning(f"Invalid predictions in batch {batch_num}, using zeros")
-                    pred = torch.zeros_like(pred)
-                
-                predictions.append(pred.cpu().numpy())
-                
-                # Store image names for reference
-                batch_names = [os.path.basename(path) for path in batch['image_paths']]
-                image_names.extend(batch_names)
-                
-                logger.info(f"Successfully processed batch {batch_num}: {len(batch_names)} images")
-                
-                break  # Only one batch per dataloader
+    with torch.no_grad():
+        for i, (batch_x, batch_y) in enumerate(data_loader):
+            batch_x = batch_x.float()
+            batch_y = batch_y.float()
+            
+            # Generate predictions
+            logger.debug(f"Generating predictions for batch {i}...")
+            pred = model(batch_x)
+            logger.debug(f"Generated predictions shape: {pred.shape}")
+            
+            # Validate predictions
+            if torch.isnan(pred).any() or torch.isinf(pred).any():
+                logger.warning(f"Invalid predictions in batch {i}, using zeros")
+                pred = torch.zeros_like(pred)
+            
+            predictions.append(pred.cpu().numpy())
+            
+            logger.info(f"Successfully processed batch {i}: {len(batch_x)} images")
+            
+            break  # Only one batch per dataloader
+    
+    logger.info(f"Inference complete")
     
     # Concatenate all predictions
     if predictions:
@@ -731,68 +676,14 @@ def inference(args):
         try:
             logger.info("Saving predictions...")
             np.save(os.path.join(inference_dir, "predictions.npy"), all_predictions)
-            
-            # Save image names for reference
-            with open(os.path.join(inference_dir, "image_names.txt"), 'w') as f:
-                for name in image_names:
-                    f.write(f"{name}\n")
-            
-            # Save failed images list
-            if failed_images:
-                with open(os.path.join(inference_dir, "failed_images.txt"), 'w') as f:
-                    for name in failed_images:
-                        f.write(f"{name}\n")
-                logger.warning(f"{len(failed_images)} images failed to process")
-            
-            # Save summary
-            summary = {
-                "num_images_processed": len(image_names),
-                "num_images_failed": len(failed_images),
-                "total_images_attempted": len(image_paths),
-                "prediction_length": args.prediction_length,
-                "predictions_shape": all_predictions.shape,
-                "predictions_stats": {
-                    "mean": float(all_predictions.mean()),
-                    "std": float(all_predictions.std()),
-                    "min": float(all_predictions.min()),
-                    "max": float(all_predictions.max())
-                },
-                "model_config": {
-                    "vit_model": args.vit_model,
-                    "prediction_length": args.prediction_length,
-                    "context_length": args.context_length,
-                    "feature_projection_dim": args.feature_projection_dim,
-                    "used_checkpoint": not args.no_checkpoint and args.checkpoint_path is not None
-                }
-            }
-            
-            with open(os.path.join(inference_dir, "summary.json"), 'w') as f:
-                json.dump(summary, f, indent=2)
-            
-            logger.info(f"Inference completed! Results saved to {inference_dir}")
-            logger.info(f"Successfully processed {len(image_names)} images")
-            logger.info(f"Failed to process {len(failed_images)} images")
-            logger.info(f"Predictions shape: {all_predictions.shape}")
-            logger.info(f"Sample prediction stats: mean={all_predictions.mean():.4f}, std={all_predictions.std():.4f}")
-            
         except Exception as e:
             logger.error(f"Failed to save inference results: {str(e)}")
             
     else:
         logger.error("No predictions generated! All batches failed.")
-        # Still save a summary of the failure
-        try:
-            summary = {
-                "num_images_processed": 0,
-                "num_images_failed": len(image_paths),
-                "total_images_attempted": len(image_paths),
-                "error": "All inference attempts failed"
-            }
-            with open(os.path.join(inference_dir, "summary.json"), 'w') as f:
-                json.dump(summary, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save failure summary: {str(e)}")
 
+    logger.info(f"Inference result saved")
+    
 
 def main():
     """Main entry point."""
