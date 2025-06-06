@@ -88,7 +88,7 @@ def parse_arguments():
                        help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
                        help="Learning rate")
-    parser.add_argument("--num_epochs", type=int, default=2000,
+    parser.add_argument("--num_epochs", type=int, default=200,
                        help="Number of training epochs")
     parser.add_argument("--weight_decay", type=float, default=1e-5,
                        help="Weight decay for optimizer")
@@ -145,7 +145,7 @@ def parse_arguments():
     
     # Logging arguments
     parser.add_argument("--log_level", type=str, default="INFO",
-                       choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                       choices=["pred", "INFO", "WARNING", "ERROR"],
                        help="Logging level")
     parser.add_argument("--tensorboard", action="store_true",
                        help="Use tensorboard logging")
@@ -394,9 +394,9 @@ def train(args):
     os.makedirs(experiment_dir, exist_ok=True)
     
     # Create data loaders
-    train_dataset, train_loader = data_provider(args, flag='test')
+    train_dataset, train_loader = data_provider(args, flag='train')
     test_dataset, test_loader = data_provider(args, flag='test')
-    logger.info(f"Created data loaders: {len(train_loader)} trains")
+    logger.info(f"Created data loaders: {len(train_loader)} trains {len(test_loader)} tests")
     
     # Create model
     logger.info("Creating ViT-to-TimeSeries model...")
@@ -469,6 +469,7 @@ def train(args):
             f_dim = -1 # always select last feature (OT) for calculating loss?
             outputs = outputs[:, -args.prediction_length:, f_dim:].to(device)
             batch_y = batch_y[:, -args.prediction_length:, f_dim:].to(device)
+            
             loss = criterion(outputs, batch_y)
             train_loss.append(loss.item())
 
@@ -476,14 +477,13 @@ def train(args):
                 logger.info("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
                 iter_count = 0
 
-                loss.backward()
-                optimizer.step()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
 
         logger.info("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
         train_loss = np.average(train_loss)
         test_loss = test(args, peeking=True, model=model)    # Peek testing result
-
-        model.train()   # recover from model.eval() in peeking
 
         logger.info("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Test Loss: {3:.7f}".format(
             epoch + 1, -1, train_loss, test_loss))
@@ -537,11 +537,12 @@ def test(args, peeking=False, model=None):
         ).to(device)
         logger.info("Model created successfully") 
         load_checkpoint(args.checkpoint_path, model, logger=logger)
+        logger.info("Model weights loaded successfully") 
     else:   # peeking
         assert(model is not None)
 
-    predictions = list()
-    groundTruth = list()
+    preds = []
+    trues = []
 
     criterion = nn.MSELoss()
     
@@ -550,43 +551,54 @@ def test(args, peeking=False, model=None):
     with torch.no_grad():
         for i, (batch_x, batch_y) in enumerate(test_loader):
             batch_x = batch_x.float()
-            batch_y = batch_y.float().to(device)
+            batch_y = batch_y.float()
             
             # Generate predictions
             logger.debug(f"Generating predictions for batch {i}...")
-            pred = model(batch_x)
-            logger.debug(f"Generated predictions shape: {pred.shape}")
-            
-            # Validate predictions
-            if torch.isnan(pred).any() or torch.isinf(pred).any():
-                logger.warning(f"Invalid predictions in batch {i}, using zeros")
-                pred = torch.zeros_like(pred)
-            
-            predictions.append(pred.cpu().numpy())
-            groundTruth.append(batch_y.cpu().numpy())
+            outputs = model(batch_x)
+            logger.debug(f"Generated predictions shape: {outputs.shape}")
 
-            loss = criterion(pred, batch_y)
+            f_dim = -1 # always select last feature (OT) for calculating loss?
+            outputs = outputs[:, -args.prediction_length:, f_dim:]
+            batch_y = batch_y[:, -args.prediction_length:, f_dim:]
 
-            visual(batch_x.cpu().numpy(), batch_y.cpu().numpy(), pred.cpu().numpy(), os.path.join(args.output_dir, 'batch{i}','.png'))
+            preds.append(outputs.detach().cpu())
+            trues.append(batch_y.detach().cpu())
             
-            total_loss.append(loss.cpu().numpy())
+
+            loss = criterion(outputs.detach().cpu(), batch_y)
+            if (i + 1) % 100 == 0:
+                visual(batch_x[:,:,-1].cpu().numpy(), batch_y[:,:,-1].cpu().numpy(), outputs[:,:,-1].cpu().numpy(), os.path.join(args.output_dir, ('testing_batch.png')))
+            
+            total_loss.append(loss.item())
             
     avg_loss = np.average(total_loss)
 
+    if peeking:
+        model.train()
 
-    preds = np.concatenate(predictions, axis=0)
-    trues = np.concatenate(groundTruth, axis=0)
+
+    preds = np.concatenate(preds, axis=0)
+    trues = np.concatenate(trues, axis=0)
+    #print('test shape:', preds.shape, trues.shape)
+    preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
+    trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
+    #print('test shape:', preds.shape, trues.shape)
+
 
     mae, mse, rmse, mape, mspe = metric(preds, trues)
     print('mse:{}, mae:{}'.format(mse, mae))
-    f = open("result_long_term_forecast.txt", 'a')
+    f = open("result.txt", 'a')
     f.write('mse:{}, mae:{}'.format(mse, mae))
     f.write('\n')
     f.write('\n')
     f.close()
 
-    np.save(os.path.join(args.output_dir, 'pred.npy'), preds)
-    np.save(os.path.join(args.output_dir, 'true.npy'), trues)
+    np.save(args.output_dir + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
+    np.save(args.output_dir + 'pred.npy', preds)
+    np.save(args.output_dir + 'true.npy', trues)
+
+    #print('avg_loss:{:.4f}'.format(avg_loss))
     
     return avg_loss
 

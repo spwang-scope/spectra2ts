@@ -4,13 +4,19 @@ from torch.utils.data import DataLoader
 def data_provider(args, flag):
 
     shuffle_flag = False if (flag == 'test' or flag == 'TEST') else True
-    drop_last = False
     batch_size = args.batch_size
 
     if args.data_dir is None:
         raise ValueError("data_dir does not exist")
     if args.data_filename is None:
         raise ValueError("data_filename does not exist")
+
+    if flag == 'test':
+        shuffle_flag = False
+        drop_last = False
+    else:
+        shuffle_flag = True
+        drop_last = True
 
     data_set = Dataset_Custom(
         args = args,
