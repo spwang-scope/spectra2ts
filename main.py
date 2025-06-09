@@ -267,83 +267,6 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
     
     return optimizer, scheduler
 
-
-def train_epoch(
-    model: ViTToTimeSeriesModel,
-    train_loader: DataLoader,
-    optimizer: optim.Optimizer,
-    device: torch.device,
-    epoch: int,
-    args,
-    logger,
-    writer: Optional[SummaryWriter] = None
-) -> Dict[str, float]:
-    """Train for one epoch."""
-    model.train()
-    
-    total_loss = 0.0
-    total_samples = 0
-    
-    for batch_idx, (batch_x, batch_y) in enumerate(train_loader):        
-        # Forward pass
-        optimizer.zero_grad()
-        
-        logger.debug(f"Computing forward pass for batch {batch_idx}")
-        predictions = model(batch_x)
-        
-        # Ensure predictions and targets have same shape
-        if predictions.shape != batch_y.shape:
-            logger.warning(f"Shape mismatch: predictions {predictions.shape} vs targets {batch_y.shape}")
-            # Try to align shapes
-            if batch_y.dim() == 2 and predictions.dim() == 3:
-                batch_y = batch_y.unsqueeze(-1)
-            elif batch_y.dim() == 3 and predictions.dim() == 2:
-                predictions = predictions.unsqueeze(-1)
-        
-        # Compute loss
-        loss = nn.functional.mse_loss(predictions, batch_y)
-        
-        # Check for NaN or inf losses
-        if torch.isnan(loss) or torch.isinf(loss):
-            logger.warning(f"Invalid loss detected: {loss.item()}, skipping batch")
-            continue
-        
-        # Backward pass
-        loss.backward()
-        
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
-        optimizer.step()
-        
-        # Update metrics
-        batch_size = batch_x.size(0)
-        total_loss += loss.item() * batch_size
-        total_samples += batch_size
-        
-        # Log batch metrics
-        if writer and batch_idx % 10 == 0:
-            global_step = epoch * len(train_loader) + batch_idx
-            writer.add_scalar('Train/BatchLoss', loss.item(), global_step)
-        
-        # Print progress
-        if batch_idx % 50 == 0:
-            logger.info(
-                f'Epoch {epoch}, Batch {batch_idx}/{len(train_loader)}, '
-                f'Loss: {loss.item():.6f}'
-            )
-    
-    if total_samples == 0:
-        logger.error("No valid batches processed in this epoch!")
-        return {'train_loss': float('inf')}
-    
-    avg_loss = total_loss / total_samples
-    
-    return {
-        'train_loss': avg_loss
-    }
-
-
 def save_checkpoint(model: ViTToTimeSeriesModel, optimizer: optim.Optimizer, epoch: int, 
                    metrics: Dict[str, float], filepath: str, logger):
     """Save model checkpoint."""
@@ -505,7 +428,6 @@ def train(args):
 
 
 def test(args, peeking=False, model=None):
-
     """Test the model."""
     # Setup logging
     logger = setup_logging(args.output_dir, args.log_level)
@@ -547,59 +469,77 @@ def test(args, peeking=False, model=None):
     criterion = nn.MSELoss()
     
     total_loss = []
-    model.eval()
+    model.eval()  # Set to evaluation mode
+    
     with torch.no_grad():
         for i, (batch_x, batch_y) in enumerate(test_loader):
+            # FIXED: Properly handle device placement and data types
             batch_x = batch_x.float()
-            batch_y = batch_y.float()
+            batch_y = batch_y.float()  # Keep on CPU initially like original implementation
             
             # Generate predictions
             logger.debug(f"Generating predictions for batch {i}...")
             outputs = model(batch_x)
             logger.debug(f"Generated predictions shape: {outputs.shape}")
 
-            f_dim = -1 # always select last feature (OT) for calculating loss?
-            outputs = outputs[:, -args.prediction_length:, f_dim:]
+            # FIXED: Consistent tensor processing following original Time-Series-Library pattern
+            f_dim = -1  # always select last feature (OT) for calculating loss
+            outputs = outputs[:, -args.prediction_length:, f_dim:]  # Shape: [batch, pred_len, features]
             batch_y = batch_y[:, -args.prediction_length:, f_dim:]
-
-            preds.append(outputs.detach().cpu())
-            trues.append(batch_y.detach().cpu())
             
-
-            loss = criterion(outputs.detach().cpu(), batch_y)
+            # FIXED: Move both tensors to CPU for loss calculation (following original implementation)
+            pred = outputs.detach().cpu()
+            true = batch_y.detach().cpu()
+            
+            # Store predictions and ground truth
+            preds.append(pred)
+            trues.append(true)
+            
+            # FIXED: Calculate loss with both tensors on same device (CPU)
+            loss = criterion(pred, true)
+            
             if (i + 1) % 100 == 0:
-                visual(batch_x[:,:,-1].cpu().numpy(), batch_y[:,:,-1].cpu().numpy(), outputs[:,:,-1].cpu().numpy(), os.path.join(args.output_dir, ('testing_batch.png')))
+                # FIXED: Ensure all tensors are on CPU for visualization
+                batch_x_viz = batch_x[:,:,-1].detach().cpu().numpy()
+                batch_y_viz = true[:,:,-1].numpy()  # Already on CPU
+                outputs_viz = pred[:,:,-1].numpy()  # Already on CPU
+                visual(batch_x_viz, batch_y_viz, outputs_viz, 
+                      os.path.join(args.output_dir, f'testing_batch_{i}.png'))
             
             total_loss.append(loss.item())
             
     avg_loss = np.average(total_loss)
 
     if peeking:
-        model.train()
+        model.train()  # Return to training mode if peeking
 
-
+    # Concatenate all predictions and ground truth
     preds = np.concatenate(preds, axis=0)
     trues = np.concatenate(trues, axis=0)
-    #print('test shape:', preds.shape, trues.shape)
-    preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
-    trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
-    #print('test shape:', preds.shape, trues.shape)
+    
+    # Reshape for metric calculation
+    #preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
+    #trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
 
+    print(f"Preds: {preds.shape}, Trues: {trues.shape}")
+    print(f"Pred range: {preds.min():.6f} to {preds.max():.6f}")
+    print(f"True range: {trues.min():.6f} to {trues.max():.6f}")
 
+    # Calculate metrics
     mae, mse, rmse, mape, mspe = metric(preds, trues)
     print('mse:{}, mae:{}'.format(mse, mae))
+    
+    # Save results
     f = open("result.txt", 'a')
     f.write('mse:{}, mae:{}'.format(mse, mae))
     f.write('\n')
     f.write('\n')
     f.close()
 
-    np.save(args.output_dir + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
-    np.save(args.output_dir + 'pred.npy', preds)
-    np.save(args.output_dir + 'true.npy', trues)
+    np.save(os.path.join(args.output_dir + 'metrics.npy'), np.array([mae, mse, rmse, mape, mspe]))
+    np.save(os.path.join(args.output_dir + 'pred.npy'), preds)
+    np.save(os.path.join(args.output_dir + 'true.npy'), trues)
 
-    #print('avg_loss:{:.4f}'.format(avg_loss))
-    
     return avg_loss
 
 

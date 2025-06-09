@@ -356,7 +356,7 @@ class ViTToTimeSeriesModel(nn.Module):
     
     def forward(
         self,
-        pixel_values: torch.Tensor,
+        context_values: torch.Tensor,
         target_sequences: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         
@@ -365,7 +365,7 @@ class ViTToTimeSeriesModel(nn.Module):
         # Compute Spectra of items by items in the batch
         # They do not have gradient flowing through
         spectra_list = []
-        for item in pixel_values.numpy():
+        for item in context_values.numpy():
             spectra = torch.from_numpy(get_STFT_spectra(item))
             spectra = pad_to_64_center_bottom(spectra).to(device)
             spectra_list.append(spectra)
@@ -380,50 +380,6 @@ class ViTToTimeSeriesModel(nn.Module):
         predictions = self.ts_decoder(context, target_sequences)
         
         return predictions
-    
-    def generate(
-        self,
-        pixel_values: torch.Tensor,
-        num_samples: int = 1,
-        temperature: float = 1.0,
-        **generation_kwargs
-    ) -> torch.Tensor:
-        """
-        Generate time series predictions from images.
-        
-        Args:
-            pixel_values: Input images
-            num_samples: Number of samples to generate per image (currently only supports 1)
-            temperature: Temperature for sampling
-            **generation_kwargs: Additional generation parameters
-            
-        Returns:
-            Generated time series predictions
-        """
-        
-        self.eval()
-        with torch.no_grad():
-            batch_size = pixel_values.size(0)
-            
-            # Normalize pixel values
-            pixel_values = (pixel_values - self.image_mean) / self.image_std
-            
-            # Generate context from image
-            context = self.encode_image_to_context(pixel_values)
-            
-            if num_samples == 1:
-                # Single sample generation
-                predictions = self.ts_decoder.generate(context, temperature)
-                return predictions
-            else:
-                # Multiple samples (generate multiple times)
-                samples = []
-                for _ in range(num_samples):
-                    sample = self.ts_decoder.generate(context, temperature)
-                    samples.append(sample)
-                
-                # Stack samples: (batch_size, num_samples, prediction_length, time_series_dim)
-                return torch.stack(samples, dim=1)
     
     def freeze_vit_encoder(self, freeze: bool = True):
         """Freeze or unfreeze the ViT encoder parameters."""
