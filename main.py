@@ -34,7 +34,6 @@ except ImportError:
     raise ImportError("transformers library is required. Install with: pip install transformers")
 
 from model import ViTToTimeSeriesModel, create_model
-from dataset import create_dataloader, create_dummy_dataset, ImageTimeSeriesDataset
 from bridge import CorrelationAlignment
 
 
@@ -169,73 +168,6 @@ def get_device(device_arg: str) -> torch.device:
         return torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     else:
         return torch.device(device_arg)
-
-
-def get_image_paths_from_dir(data_dir: str) -> list:
-    """Get all image paths from data directory."""
-    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif']
-    image_paths = []
-    
-    for extension in image_extensions:
-        pattern = os.path.join(data_dir, extension)
-        image_paths.extend(glob.glob(pattern))
-        # Also check for uppercase extensions
-        pattern = os.path.join(data_dir, extension.upper())
-        image_paths.extend(glob.glob(pattern))
-    
-    return sorted(image_paths)
-
-
-def create_data_loaders(args, logger) -> tuple:
-    """Create training and validation data loaders."""
-    if args.use_dummy_data:
-        # Create dummy dataset
-        logger.info("Creating dummy dataset...")
-        image_paths, time_series_data = create_dummy_dataset(
-            num_samples=args.num_dummy_samples,
-            prediction_length=args.prediction_length,
-            save_dir=os.path.join(args.output_dir, "dummy_images")
-        )
-        
-        # Split into train/val
-        split_idx = int(0.8 * len(image_paths))
-        train_images, val_images = image_paths[:split_idx], image_paths[split_idx:]
-        train_ts, val_ts = time_series_data[:split_idx], time_series_data[split_idx:]
-        
-    else:
-        # Load real dataset (implement your data loading logic here)
-        if args.data_dir is None:
-            raise ValueError("data_dir must be specified when not using dummy data")
-        
-        # TODO: Implement real data loading
-        raise NotImplementedError("Real data loading not implemented yet")
-    
-    # Create data loaders
-    logger.info("Creating training dataloader...")
-    train_loader = create_dataloader(
-        image_paths=train_images,
-        time_series_data=train_ts,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        augment=args.augment,
-        prediction_length=args.prediction_length,
-        image_size=args.image_size,
-    )
-    
-    logger.info("Creating validation dataloader...")
-    val_loader = create_dataloader(
-        image_paths=val_images,
-        time_series_data=val_ts,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        augment=False,
-        prediction_length=args.prediction_length,
-        image_size=args.image_size,
-    )
-    
-    return train_loader, val_loader
 
 
 def create_optimizer_and_scheduler(model: nn.Module, args):
@@ -530,15 +462,16 @@ def test(args, peeking=False, model=None):
     print('mse:{}, mae:{}'.format(mse, mae))
     
     # Save results
-    f = open("result.txt", 'a')
-    f.write('mse:{}, mae:{}'.format(mse, mae))
+    f = open(os.path.join(args.output_dir, "result.txt"), 'a')
+    f.write('MSE: {:.7f}, MAE: {:.7f}, RMSE: {:.7f}, MAPE: {:.7f}, MSPE: {:.7f}\n'.format(
+        mse, mae, rmse, mape, mspe))
     f.write('\n')
     f.write('\n')
     f.close()
 
-    np.save(os.path.join(args.output_dir + 'metrics.npy'), np.array([mae, mse, rmse, mape, mspe]))
-    np.save(os.path.join(args.output_dir + 'pred.npy'), preds)
-    np.save(os.path.join(args.output_dir + 'true.npy'), trues)
+    np.save(os.path.join(args.output_dir, 'metrics.npy'), np.array([mae, mse, rmse, mape, mspe]))
+    np.save(os.path.join(args.output_dir, 'pred.npy'), preds)
+    np.save(os.path.join(args.output_dir, 'true.npy'), trues)
 
     return avg_loss
 
