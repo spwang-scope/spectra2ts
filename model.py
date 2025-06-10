@@ -2,7 +2,7 @@
 ViT to TimeSeries Model
 
 Combines Vision Transformer encoder with custom Transformer decoder
-using CORAL domain bridging.
+using CORAL domain bridging. No teacher forcing - following TSLib best practices.
 """
 
 import torch
@@ -41,7 +41,7 @@ class PositionalEncoding(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Tensor of shape (context_length, batch_size, d_model)
+            x: Tensor of shape (seq_length, batch_size, d_model)
         """
         return x + self.pe[:x.size(0), :]
 
@@ -50,8 +50,8 @@ class TimeSeriesTransformerDecoder(nn.Module):
     """
     Custom Transformer decoder for time series generation from context vector.
     
-    Takes a single context vector and generates a fixed-length time series
-    using autoregressive generation with cross-attention.
+    Generates fixed-length time series using autoregressive generation without teacher forcing.
+    Following Time-Series-Library best practices.
     """
     
     def __init__(
@@ -88,7 +88,7 @@ class TimeSeriesTransformerDecoder(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             activation='gelu',
-            batch_first=False  # Use (context_length, batch, features) format
+            batch_first=False  # Use (seq_length, batch, features) format
         )
         
         self.transformer_decoder = nn.TransformerDecoder(
@@ -125,80 +125,12 @@ class TimeSeriesTransformerDecoder(nn.Module):
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
     
-    def forward(
-        self, 
-        context: torch.Tensor, 
-        target_sequence: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def forward(self, context: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass for training with teacher forcing.
+        Forward pass using autoregressive generation (no teacher forcing).
         
         Args:
             context: Context vector from image encoding (batch_size, context_dim)
-            target_sequence: Target time series for training (batch_size, context_length, time_series_dim)
-            
-        Returns:
-            Predicted time series (batch_size, prediction_length, time_series_dim)
-        """
-        batch_size = context.size(0)
-        device = context.device
-        
-        # Project context to d_model
-        projected_context = self.context_projection(context)  # (batch_size, d_model)
-        
-        # Create memory for cross-attention (context needs to be in sequence format)
-        # We'll use the context as a single "token" in memory
-        memory = projected_context.unsqueeze(0)  # (1, batch_size, d_model)
-        
-        if self.training and target_sequence is not None:
-            # Training mode with teacher forcing
-            context_length = target_sequence.size(1)
-            
-            # Create input sequence by prepending start token
-            start_tokens = self.start_token.expand(batch_size, 1, self.time_series_dim)
-            if context_length > 1:
-                # Use shifted target sequence (exclude last token for input)
-                decoder_input = torch.cat([start_tokens, target_sequence[:, :-1, :]], dim=1)
-            else:
-                decoder_input = start_tokens
-            
-            # Embed decoder input
-            embedded_input = self.value_embedding(decoder_input)  # (batch_size, context_length, d_model)
-            
-            # Transpose for transformer: (context_length, batch_size, d_model)
-            embedded_input = embedded_input.transpose(0, 1)
-            
-            # Add positional encoding
-            embedded_input = self.pos_encoding(embedded_input)
-            
-            # Create causal mask
-            tgt_mask = self._generate_square_subsequent_mask(embedded_input.size(0), device)
-            
-            # Pass through transformer decoder
-            decoder_output = self.transformer_decoder(
-                tgt=embedded_input,
-                memory=memory,
-                tgt_mask=tgt_mask
-            )  # (context_length, batch_size, d_model)
-            
-            # Project to output dimension
-            predictions = self.output_projection(decoder_output)  # (context_length, batch_size, time_series_dim)
-            
-            # Transpose back to batch first: (batch_size, context_length, time_series_dim)
-            predictions = predictions.transpose(0, 1)
-            
-            return predictions
-        else:
-            # Inference mode - autoregressive generation
-            return self.generate(context)
-    
-    def generate(self, context: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
-        """
-        Generate time series autoregressively from context.
-        
-        Args:
-            context: Context vector (batch_size, context_dim)
-            temperature: Temperature for generation (not used for deterministic output)
             
         Returns:
             Generated time series (batch_size, prediction_length, time_series_dim)
@@ -223,8 +155,8 @@ class TimeSeriesTransformerDecoder(nn.Module):
             embedded_input = self.pos_encoding(embedded_input)
             
             # Create causal mask
-            context_length = embedded_input.size(0)
-            tgt_mask = self._generate_square_subsequent_mask(context_length, device)
+            seq_length = embedded_input.size(0)
+            tgt_mask = self._generate_square_subsequent_mask(seq_length, device)
             
             # Pass through transformer decoder
             decoder_output = self.transformer_decoder(
@@ -257,7 +189,7 @@ class ViTToTimeSeriesModel(nn.Module):
     Custom architecture combining ViT encoder with Transformer decoder.
     
     Uses CORAL (Correlation Alignment) for domain bridging between
-    computer vision and time series domains.
+    computer vision and time series domains. No teacher forcing.
     """
     
     def __init__(
@@ -323,7 +255,7 @@ class ViTToTimeSeriesModel(nn.Module):
             use_bias=False
         )
         
-        # Custom Transformer Decoder for Time Series Generation
+        # Custom Transformer Decoder for Time Series Generation (no teacher forcing)
         self.ts_decoder = TimeSeriesTransformerDecoder(
             context_dim=feature_projection_dim,
             d_model=ts_model_dim,
@@ -354,12 +286,16 @@ class ViTToTimeSeriesModel(nn.Module):
         
         return context
     
-    def forward(
-        self,
-        context_values: torch.Tensor,
-        target_sequences: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def forward(self, context_values: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass without teacher forcing.
         
+        Args:
+            context_values: Input time series for spectrogram generation
+            
+        Returns:
+            Predicted time series (batch_size, prediction_length, time_series_dim)
+        """
         device = next(self.parameters()).device
         
         # Compute Spectra of items by items in the batch
@@ -376,8 +312,8 @@ class ViTToTimeSeriesModel(nn.Module):
         # Generate context vector from spectrograms
         context = self.encode_image_to_context(spectra_tensor)
         
-        # Generate time series from context using transformer decoder
-        predictions = self.ts_decoder(context, target_sequences)
+        # Generate time series from context using autoregressive generation (no teacher forcing)
+        predictions = self.ts_decoder(context)
         
         return predictions
     
