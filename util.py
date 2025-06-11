@@ -62,33 +62,20 @@ def pad_to_64_center_bottom(input_tensor: torch.Tensor) -> torch.Tensor:
 
     return padded_tensor
 
-def visual(batch_x, batch_y, pred, save_path):
+def visual(true, preds, save_path):
     """
     Visualizes the context, ground truth, and prediction for a time series batch.
-    
-    Args:
-        batch_x (np.ndarray): Context sequence of shape (seq_len,)
-        batch_y (np.ndarray): Ground truth of prediction horizon (same length as pred)
-        pred (np.ndarray): Model prediction (same shape as batch_y)
-        save_path (str): Output file path for saving the figure
     """
-    # Ensure all are 1D arrays
-    batch_x = batch_x.flatten()
-    batch_y = batch_y.flatten()
-    pred = pred.flatten()
-
-    context_len = len(batch_x)
-    horizon_len = len(batch_y)
-
-    # Construct x-axis timeline
-    x_context = np.arange(context_len)
-    x_future = np.arange(context_len, context_len + horizon_len)
+    context_len = len(true)
+    horizon_len = len(preds)
 
     # Plot
     plt.figure(figsize=(10, 4))
-    plt.plot(x_context, batch_x, color='blue', label='Context')
-    plt.plot(x_future, batch_y, color='blue', linestyle='--', label='Ground Truth')
-    plt.plot(x_future, pred, color='red', linestyle='--', label='Prediction')
+    
+    plt.figure()
+    plt.plot(true, color='blue', label='GroundTruth', linewidth=2)
+    plt.plot(preds, color='red', label='Prediction', linewidth=2)
+    plt.legend()
 
     plt.xlabel('Time Step')
     plt.ylabel('Value')

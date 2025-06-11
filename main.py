@@ -69,7 +69,7 @@ def parse_arguments():
                        help="Dimension for CORAL feature projection")
     parser.add_argument("--time_series_dim", type=int, default=1,
                        help="Dimension of time series (1 for univariate)")
-    parser.add_argument("--ts_model_dim", type=int, default=256,
+    parser.add_argument("--ts_model_dim", type=int, default=768,
                        help="Hidden dimension for transformer decoder")
     parser.add_argument("--ts_num_heads", type=int, default=8,
                        help="Number of attention heads")
@@ -81,6 +81,8 @@ def parse_arguments():
                        help="Dropout rate for transformer")
     parser.add_argument('--target', type=str, default='OT',
                        help='target feature in S or MS task')
+    parser.add_argument("--lstm", action="store_true",
+                       help="Use LSTM decoder instead of Transformer decoder")
     
     # Training arguments
     parser.add_argument("--batch_size", type=int, default=8,
@@ -268,6 +270,7 @@ def train(args):
         ts_num_layers=args.ts_num_layers,
         ts_dim_feedforward=args.ts_dim_feedforward,
         ts_dropout=args.ts_dropout,
+        use_lstm_decoder=args.lstm,
     ).to(device)
     logger.info("Model created successfully")
     
@@ -316,15 +319,14 @@ def train(args):
         for i, (batch_x, batch_y) in enumerate(train_loader):
             iter_count += 1
             optimizer.zero_grad()
-            batch_x = batch_x.float()
-            batch_y = batch_y.float()
+            batch_x = batch_x.float().to(device)
+            batch_y = batch_y.float().to(device)
 
             outputs = model(batch_x)
 
             f_dim = -1 # always select last feature (OT) for calculating loss?
             outputs = outputs[:, -args.prediction_length:, f_dim:].to(device)
             batch_y = batch_y[:, -args.prediction_length:, f_dim:].to(device)
-            
             loss = criterion(outputs, batch_y)
             train_loss.append(loss.item())
 
@@ -388,6 +390,7 @@ def test(args, peeking=False, model=None):
             ts_num_layers=args.ts_num_layers,
             ts_dim_feedforward=args.ts_dim_feedforward,
             ts_dropout=args.ts_dropout,
+            use_lstm_decoder=args.lstm,
         ).to(device)
         logger.info("Model created successfully") 
         load_checkpoint(args.checkpoint_path, model, logger=logger)
@@ -405,38 +408,28 @@ def test(args, peeking=False, model=None):
     
     with torch.no_grad():
         for i, (batch_x, batch_y) in enumerate(test_loader):
-            # FIXED: Properly handle device placement and data types
-            batch_x = batch_x.float()
-            batch_y = batch_y.float()  # Keep on CPU initially like original implementation
-            
-            # Generate predictions
-            logger.debug(f"Generating predictions for batch {i}...")
-            outputs = model(batch_x)
-            logger.debug(f"Generated predictions shape: {outputs.shape}")
+            batch_x = batch_x.float().to(device)
+            batch_y = batch_y.float().to(device)
 
-            # FIXED: Consistent tensor processing following original Time-Series-Library pattern
-            f_dim = -1  # always select last feature (OT) for calculating loss
-            outputs = outputs[:, -args.prediction_length:, f_dim:]  # Shape: [batch, pred_len, features]
-            batch_y = batch_y[:, -args.prediction_length:, f_dim:]
+            outputs = model(batch_x)
+
+            f_dim = -1 # always select last feature (OT) for calculating loss?
+            outputs = outputs[:, -args.prediction_length:, f_dim:].to(device)
+            batch_y = batch_y[:, -args.prediction_length:, f_dim:].to(device)
+            loss = criterion(outputs, batch_y)
             
             # FIXED: Move both tensors to CPU for loss calculation (following original implementation)
             pred = outputs.detach().cpu()
             true = batch_y.detach().cpu()
-            
+
             # Store predictions and ground truth
             preds.append(pred)
             trues.append(true)
-            
-            # FIXED: Calculate loss with both tensors on same device (CPU)
-            loss = criterion(pred, true)
-            
-            if (i + 1) % 100 == 0:
-                # FIXED: Ensure all tensors are on CPU for visualization
-                batch_x_viz = batch_x[:,:,-1].detach().cpu().numpy()
-                batch_y_viz = true[:,:,-1].numpy()  # Already on CPU
-                outputs_viz = pred[:,:,-1].numpy()  # Already on CPU
-                visual(batch_x_viz, batch_y_viz, outputs_viz, 
-                      os.path.join(args.output_dir, f'testing_batch_{i}.png'))
+            if i % 20 == 0:
+                input = batch_x.detach().cpu().numpy()
+                gt = np.concatenate((input[0, :, -1], true[0, :, -1]), axis=0)
+                pd = np.concatenate((input[0, :, -1], pred[0, :, -1]), axis=0)
+                visual(gt, pd, os.path.join(args.output_dir, str(i) + '.png'))
             
             total_loss.append(loss.item())
             
@@ -502,6 +495,7 @@ def inference(args):
         ts_num_layers=args.ts_num_layers,
         ts_dim_feedforward=args.ts_dim_feedforward,
         ts_dropout=args.ts_dropout,
+        use_lstm_decoder=args.lstm,
     ).to(device)
     logger.info("Model created successfully")
     
