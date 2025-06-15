@@ -15,6 +15,7 @@ import numpy as np
 import math
 from get_stft_spectra import get_STFT_spectra
 from util import pad_to_multiple_of_4_center_bottom, pad_to_64_center_bottom
+from normalizer import TensorNormalizer
 
 from bridge import CorrelationAlignment
 
@@ -260,10 +261,10 @@ class TimeSeriesLSTMDecoder(nn.Module):
         batch_size = context.size(0)
         
         # Project context to LSTM input dimension
-        #projected_context = self.context_projection(context)  # (batch_size, hidden_dim)
+        projected_context = self.context_projection(context)  # (batch_size, hidden_dim)
         
         # Repeat context for sequence length
-        lstm_input = context.unsqueeze(1).repeat(1, self.prediction_length, 1)  # (batch_size, seq_len, hidden_dim)
+        lstm_input = projected_context.unsqueeze(1).repeat(1, self.prediction_length, 1)  # (batch_size, seq_len, hidden_dim)
         
         # Pass through LSTM
         lstm_output, _ = self.lstm(lstm_input)  # (batch_size, seq_len, hidden_dim)
@@ -336,7 +337,7 @@ class ViTToTimeSeriesModel(nn.Module):
         # ViT Encoder
         config = ViTConfig.from_pretrained("google/vit-base-patch16-224-in21k")
         config.image_size = image_size
-        config.patch_size = 4
+        config.patch_size = 8
         config.num_channels = num_channels
         self.vit_encoder = ViTModel(config=config)
         
@@ -384,15 +385,14 @@ class ViTToTimeSeriesModel(nn.Module):
         # ViT encoding
         vit_outputs = self.vit_encoder(pixel_values=pixel_values)
         image_features = vit_outputs.last_hidden_state[:, 0]  # Use CLS token
-        return image_features
+
         #print(image_features.shape)
         
-        # CORAL domain bridging
-        #context = self.domain_bridge(image_features)
+        context = self.domain_bridge(image_features)
         #print(context.shape)
-        #return context
+        return context
     
-    def forward(self, context_values: torch.Tensor) -> torch.Tensor:
+    def forward(self, ts_values: torch.Tensor) -> torch.Tensor:
         """
         Forward pass without teacher forcing.
         
@@ -403,11 +403,11 @@ class ViTToTimeSeriesModel(nn.Module):
             Predicted time series (batch_size, prediction_length, time_series_dim)
         """
         device = next(self.parameters()).device
-        
+
         # Compute Spectra of items by items in the batch
         # They do not have gradient flowing through
         spectra_list = []
-        for item in context_values.cpu().numpy():
+        for item in ts_values.cpu().numpy():
             spectra = torch.from_numpy(get_STFT_spectra(item))
             spectra = pad_to_64_center_bottom(spectra).to(device)
             spectra_list.append(spectra)

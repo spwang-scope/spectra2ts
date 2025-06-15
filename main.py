@@ -143,7 +143,9 @@ def parse_arguments():
                        help="Device to use (auto, cpu, cuda)")
     parser.add_argument("--mixed_precision", action="store_true",
                        help="Use mixed precision training")
-    
+    parser.add_argument("--cuda_num", type=int, default=7,
+                       help="CUDA device number")
+
     # Logging arguments
     parser.add_argument("--log_level", type=str, default="INFO",
                        choices=["pred", "INFO", "WARNING", "ERROR"],
@@ -164,10 +166,10 @@ def parse_arguments():
     return args
 
 
-def get_device(device_arg: str) -> torch.device:
+def get_device(device_arg: str, cuda_num: int) -> torch.device:
     """Get the appropriate device."""
     if device_arg == "auto":
-        return torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+        return torch.device(f"cuda:{cuda_num}" if torch.cuda.is_available() else "cpu")
     else:
         return torch.device(device_arg)
 
@@ -246,7 +248,7 @@ def train(args):
     logger = setup_logging(args.output_dir, args.log_level)
     
     # Setup
-    device = get_device(args.device)
+    device = get_device(args.device, args.cuda_num)
     experiment_dir = os.path.join(args.output_dir, args.experiment_name)
     os.makedirs(experiment_dir, exist_ok=True)
     
@@ -335,7 +337,7 @@ def train(args):
                 iter_count = 0
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
             optimizer.step()
 
         logger.info("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
@@ -366,7 +368,7 @@ def test(args, peeking=False, model=None):
     # Setup logging
     logger = setup_logging(args.output_dir, args.log_level)
     
-    device = get_device(args.device)
+    device = get_device(args.device, args.cuda_num)
     
     if not args.checkpoint_path and not peeking:
         raise ValueError("checkpoint_path must be specified for testing")
@@ -441,6 +443,10 @@ def test(args, peeking=False, model=None):
     # Concatenate all predictions and ground truth
     preds = np.concatenate(preds, axis=0)
     trues = np.concatenate(trues, axis=0)
+
+    # Avoid divide by zero in metrics
+    preds[preds == 0] = 1e-6
+    trues[trues == 0] = 1e-6
     
     # Reshape for metric calculation
     #preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
@@ -449,6 +455,8 @@ def test(args, peeking=False, model=None):
     print(f"Preds: {preds.shape}, Trues: {trues.shape}")
     print(f"Pred range: {preds.min():.6f} to {preds.max():.6f}")
     print(f"True range: {trues.min():.6f} to {trues.max():.6f}")
+    print('contains NaN:', np.isnan(preds).any(), np.isnan(trues).any())
+    print('contains Inf:', np.isinf(preds).any(), np.isinf(trues).any())
 
     # Calculate metrics
     mae, mse, rmse, mape, mspe = metric(preds, trues)
@@ -475,7 +483,7 @@ def inference(args):
     # Setup logging
     logger = setup_logging(args.output_dir, args.log_level)
     
-    device = get_device(args.device)
+    device = get_device(args.device, args.cuda_num)
     
     if not args.no_checkpoint and not args.checkpoint_path:
         raise ValueError("checkpoint_path must be specified for inference, or use --no_checkpoint for trial run")
