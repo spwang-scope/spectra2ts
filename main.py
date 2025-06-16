@@ -337,7 +337,7 @@ def train(args):
                 iter_count = 0
 
             loss.backward()
-            if epoch < args.num_epochs*0.1: # Warmup phase
+            if epoch < args.num_epochs*0.05: # Warmup phase
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
             optimizer.step()
 
