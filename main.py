@@ -36,21 +36,23 @@ except ImportError:
 from model import ViTToTimeSeriesModel, create_model
 from bridge import CorrelationAlignment
 
+logger = logging.getLogger(__name__)
 
-def setup_logging(log_dir: str = "./logs", log_level: str = "INFO"):
+
+def setup_logging(args):
     """Setup logging configuration."""
-    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
     
     logging.basicConfig(
-        level=getattr(logging, log_level.upper()),
+        level=getattr(logging, args.log_level.upper()),
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(os.path.join(log_dir, 'training.log')),
+            logging.FileHandler(os.path.join(args.output_dir, 'training.log')),
             logging.StreamHandler()
         ]
     )
     
-    return logging.getLogger(__name__)
+    return
 
 
 def parse_arguments():
@@ -244,8 +246,6 @@ def load_checkpoint(filepath: str, model: ViTToTimeSeriesModel,
 
 def train(args):
     """Main training function."""
-    # Setup logging
-    logger = setup_logging(args.output_dir, args.log_level)
     
     # Setup
     device = get_device(args.device, args.cuda_num)
@@ -366,8 +366,6 @@ def train(args):
 
 def test(args, peeking=False, model=None):
     """Test the model."""
-    # Setup logging
-    logger = setup_logging(args.output_dir, args.log_level)
     
     device = get_device(args.device, args.cuda_num)
     
@@ -456,8 +454,6 @@ def test(args, peeking=False, model=None):
     print(f"Preds: {preds.shape}, Trues: {trues.shape}")
     print(f"Pred range: {preds.min():.6f} to {preds.max():.6f}")
     print(f"True range: {trues.min():.6f} to {trues.max():.6f}")
-    print('contains NaN:', np.isnan(preds).any(), np.isnan(trues).any())
-    print('contains Inf:', np.isinf(preds).any(), np.isinf(trues).any())
 
     # Calculate metrics
     mae, mse, rmse, mape, mspe = metric(preds, trues)
@@ -481,8 +477,6 @@ def test(args, peeking=False, model=None):
 def inference(args):
     
     """Run inference on new data."""
-    # Setup logging
-    logger = setup_logging(args.output_dir, args.log_level)
     
     device = get_device(args.device, args.cuda_num)
     
@@ -579,6 +573,10 @@ def inference(args):
 def main():
     """Main entry point."""
     args = parse_arguments()
+
+    setup_logging(args)
+    logger.info("Experiment arguments: %s", vars(args))
+    torch.manual_seed(42)  # For reproducibility
     
     if args.mode == "train":
         train(args)
