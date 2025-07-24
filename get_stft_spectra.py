@@ -7,6 +7,9 @@ from scipy import signal
 from sklearn.preprocessing import StandardScaler
 
 def get_STFT_spectra(np_array_data, nperseg = 32, noverlap = 28) -> np.array:
+
+    #print(f"Input data shape: {np_array_data.shape}")
+    #breakpoint()
     
     # Since we want to iterate column by column, we could only firstly transpose it,
     # then iterate row by row
