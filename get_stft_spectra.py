@@ -24,8 +24,7 @@ def get_STFT_spectra(np_array_data) -> np.array:
         Returns:
             tuple: (nperseg, noverlap) parameters for scipy.signal.stft
         """
-        # Target nperseg as approximately 1/3 of length (based on Option 1: 32/96 ≈ 1/3)
-        target_nperseg = length // 3
+        target_nperseg = length // 4
         
         # Ensure minimum reasonable window size
         min_nperseg = 8
@@ -41,7 +40,7 @@ def get_STFT_spectra(np_array_data) -> np.array:
             power_of_2 = 2 ** round(np.log2(target_nperseg))
             
             # If the power of 2 is too far from target, use a more flexible approach
-            if abs(power_of_2 - target_nperseg) > target_nperseg * 0.3:
+            if abs(power_of_2 - target_nperseg) > target_nperseg * 0.25:
                 # Use multiples of 8 for reasonable values
                 nperseg = max(min_nperseg, (target_nperseg // 8) * 8)
                 if nperseg == 0:
@@ -82,7 +81,7 @@ def get_STFT_spectra(np_array_data) -> np.array:
         standardized_values = data_scaler.fit_transform(column.reshape(-1, 1)).flatten()
 
         # Apply STFT to the standardized signal
-        _, _, Zxx_orig = signal.stft(standardized_values, fs=1.0, nperseg=nperseg, noverlap=noverlap)
+        _, _, Zxx_orig = signal.stft(standardized_values, fs=1.0, nperseg=nperseg, noverlap=noverlap, nfft=64)
         spec_orig = np.abs(Zxx_orig)  # Get magnitude
 
         spectra_list.append(spec_orig)
