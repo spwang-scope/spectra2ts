@@ -320,10 +320,19 @@ def train(args):
             # Forward pass with teacher forcing (training mode)
             outputs = model(batch_x, mode='train')
 
-            # Select target feature for loss calculation
-            f_dim = -1
+            # Select target feature for loss calculation - use last feature only
             outputs = outputs[:, :, :].to(device)
-            batch_y = batch_y[:, -args.prediction_length:, f_dim:].to(device)
+            batch_y = batch_y[:, -args.prediction_length:, -1:].to(device)
+            
+            # Debug shapes
+            if i == 0:  # Print shapes for first batch only
+                logger.info(f"Debug shapes - outputs: {outputs.shape}, batch_y: {batch_y.shape}")
+                logger.info(f"batch_x shape: {batch_x.shape}")
+            
+            # Check for empty tensors
+            if outputs.numel() == 0:
+                logger.error(f"Empty outputs tensor! Shape: {outputs.shape}")
+                continue
             
             loss = criterion(outputs, batch_y)
             train_loss.append(loss.item())
