@@ -318,11 +318,16 @@ def train(args):
             batch_y = batch_y.float().to(device)
 
             # Forward pass with teacher forcing (training mode)
-            outputs = model(batch_x, mode='train')
+            outputs = model(context=batch_x, tf_target=batch_y, mode='train')
 
-            # Select target feature for loss calculation - use last feature only
+            # Select target feature for loss calculation based on time_series_dim
             outputs = outputs[:, :, :].to(device)
-            batch_y = batch_y[:, -args.prediction_length:, -1:].to(device)
+            if hasattr(args, 'time_series_dim') and args.time_series_dim > 1:
+                # Multi-variable prediction: use last time_series_dim features
+                batch_y = batch_y[:, :args.prediction_length, -args.time_series_dim:].to(device)
+            else:
+                # Single variable prediction: use last feature only
+                batch_y = batch_y[:, :args.prediction_length, -1:].to(device)
             
             # Debug shapes
             if i == 0:  # Print shapes for first batch only
