@@ -242,6 +242,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             
             # Project to output dimension and remove start token
             output = self.output_projection(output)  # (batch_size, pred_len+1, ts_dim)
+            
             output = output[:, 1:, :]  # Remove start token: (batch_size, pred_len, ts_dim)
             
         else:
@@ -392,22 +393,20 @@ class ViTToTimeSeriesModel(nn.Module):
         
         return bridged_features
     
-    def forward(self, ts_values: torch.Tensor, mode: str = 'train') -> torch.Tensor:
+    def forward(self, context: torch.Tensor, tf_target: torch.Tensor = None, mode: str = 'train') -> torch.Tensor:
         """
         Forward pass with teacher forcing for training or autoregressive for inference.
         
         Args:
-            ts_values: Input time series (batch_size, context_length + prediction_length, features)
+            context: Input context time series (batch_size, context_length, features)
+            tf_target: Target time series for teacher forcing (batch_size, prediction_length, features) - only used in training
             mode: 'train' for teacher forcing, 'inference' for autoregressive generation
             
         Returns:
             Predicted time series (batch_size, prediction_length, time_series_dim)
         """
         device = next(self.parameters()).device
-        batch_size = ts_values.size(0)
-        
-        # Split context and target
-        context = ts_values[:, :self.context_length, :]  # (batch, context_len, features)
+        batch_size = context.size(0)
         
         # Get last feature column of context as condition
         context_condition = context[:, :, -1]  # (batch, context_len)
@@ -426,12 +425,22 @@ class ViTToTimeSeriesModel(nn.Module):
         encoder_features = self.encode_spectrogram_to_features(spectra_tensor)
         
         if mode == 'train':
-            # Teacher forcing: use ground truth target
-            target = ts_values[:, self.context_length:, -1:]  # (batch, pred_len, 1)
+            # Teacher forcing: use ground truth target (based on time_series_dim)
+            if tf_target is not None:
+                if self.time_series_dim == 1:
+                    # Single variable: use last feature
+                    target_features = tf_target[:, :, -1:]  # (batch, pred_len, 1)
+                else:
+                    # Multi-variable: use last time_series_dim features
+                    target_features = tf_target[:, :, -self.time_series_dim:]  # (batch, pred_len, time_series_dim)
+            else:
+                raise ValueError("tf_target must be provided in training mode")
+            
+            
             predictions = self.ts_decoder(
                 encoder_output=encoder_features,
                 context_condition=context_condition,
-                target=target,
+                target=target_features,
                 use_teacher_forcing=True
             )
         else:
@@ -445,29 +454,17 @@ class ViTToTimeSeriesModel(nn.Module):
         
         return predictions
     
-    def inference(self, ts_values: torch.Tensor) -> torch.Tensor:
+    def inference(self, context: torch.Tensor) -> torch.Tensor:
         """
         Inference mode without teacher forcing.
         
         Args:
-            ts_values: Input context time series (batch_size, context_length, features)
+            context: Input context time series (batch_size, context_length, features)
             
         Returns:
             Predicted time series (batch_size, prediction_length, time_series_dim)
         """
-        # For inference, we only need context, not target
-        # Pad with zeros if needed to match expected input shape
-        if ts_values.size(1) == self.context_length:
-            # Pad with zeros for prediction length
-            padding = torch.zeros(
-                ts_values.size(0), 
-                self.prediction_length, 
-                ts_values.size(2),
-                device=ts_values.device
-            )
-            ts_values = torch.cat([ts_values, padding], dim=1)
-        
-        return self.forward(ts_values, mode='inference')
+        return self.forward(context=context, tf_target=None, mode='inference')
     
     def freeze_vit_encoder(self, freeze: bool = True):
         """Freeze or unfreeze the ViT encoder parameters."""
