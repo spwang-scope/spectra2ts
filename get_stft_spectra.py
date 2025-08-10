@@ -6,87 +6,117 @@ import numpy as np
 from scipy import signal
 from sklearn.preprocessing import StandardScaler
 
-def get_STFT_spectra(np_array_data) -> np.array:
-
-    # Optimized version for scipy targeting 64 frames width
-    def get_stft_params(length):
-        """
-        Calculate nperseg and noverlap for STFT based on input sequence length.
-        
-        This function follows the balanced approach (Option 1):
-        - nperseg ≈ length/3 (rounded to reasonable values)
-        - noverlap = 75% of nperseg (for smooth time evolution)
-        - Ensures good balance between time and frequency resolution
-        
-        Args:
-            length (int): Length of the input sequence
-            
-        Returns:
-            tuple: (nperseg, noverlap) parameters for scipy.signal.stft
-        """
-        target_nperseg = length // 4
-        
-        # Ensure minimum reasonable window size
-        min_nperseg = 8
-        max_nperseg = length // 2  # Don't exceed half the signal length
-        
-        # Round to nearest power of 2 for computational efficiency, with some flexibility
-        if target_nperseg < min_nperseg:
-            nperseg = min_nperseg
-        elif target_nperseg > max_nperseg:
-            nperseg = max_nperseg
-        else:
-            # Find nearest power of 2, but allow some flexibility for better fit
-            power_of_2 = 2 ** round(np.log2(target_nperseg))
-            
-            # If the power of 2 is too far from target, use a more flexible approach
-            if abs(power_of_2 - target_nperseg) > target_nperseg * 0.25:
-                # Use multiples of 8 for reasonable values
-                nperseg = max(min_nperseg, (target_nperseg // 8) * 8)
-                if nperseg == 0:
-                    nperseg = min_nperseg
-            else:
-                nperseg = power_of_2
-        
-        # Ensure nperseg is within bounds
-        nperseg = max(min_nperseg, min(nperseg, max_nperseg))
-        
-        # Set noverlap to 75% of nperseg (Option 1 approach)
-        noverlap = int(nperseg * 0.75)
-        
-        # Ensure noverlap is valid (must be less than nperseg)
-        noverlap = min(noverlap, nperseg - 1)
-        
-        return nperseg, noverlap
+def get_STFT_spectra(np_array_data, target_width=None) -> np.array:
+    """
+    Generate STFT spectrograms with configurable width.
+    
+    Args:
+        np_array_data: Input time series data of shape (time_steps, features)
+        target_width: Desired width of spectrogram (should match context_length)
+                     If None, uses automatic calculation
+    
+    Returns:
+        Spectrogram of shape (num_features, 64, target_width)
+    """
     
     # Since we want to iterate column by column, we could only firstly transpose it,
     # then iterate row by row
     np_array_data = np_array_data.T 
     
-    # compute the STFT parameters based on the first column's length
-    nperseg, noverlap = get_stft_params(np_array_data[0].shape[0])
-
-    # Parameters for STFT
-    # nperseg: Window length for STFT
-    # noverlap: Overlap between windows
-
-    # Initialize Numpy array to store stacking spectra
-    spectra_list = list()
-
-    # Process each column
-    for i, column in enumerate(np_array_data):  # The code iterates a row, but it's actually a column in original data
-
+    # Get time series length
+    time_length = np_array_data.shape[1]
+    
+    # If target_width is specified, use it; otherwise use time_length
+    if target_width is None:
+        target_width = time_length
+    
+    # Calculate STFT parameters to get desired width
+    # We want frequency dimension to be 64 (using nfft=128 gives us 65 freq bins, we'll take 64)
+    # For the time dimension, we need to calculate nperseg and noverlap
+    nfft = 128  # This gives us 65 frequency bins (we'll use 64)
+    
+    # Calculate nperseg and noverlap to achieve target_width time frames
+    # Formula: num_frames = (signal_length - nperseg) / (nperseg - noverlap) + 1
+    # We'll use a heuristic approach
+    if target_width >= time_length:
+        # If target width is larger than signal, use small window
+        nperseg = min(16, time_length)
+        noverlap = 0
+    else:
+        # Calculate appropriate window size
+        nperseg = min(time_length // 4, 64)  # Don't make window too large
+        # Calculate noverlap to get approximately target_width frames
+        # Rearranging the formula: noverlap = nperseg - (signal_length - nperseg) / (target_width - 1)
+        if target_width > 1:
+            noverlap = int(nperseg - (time_length - nperseg) / (target_width - 1))
+            noverlap = max(0, min(noverlap, nperseg - 1))
+        else:
+            noverlap = 0
+    
+    # Initialize list to store spectra
+    spectra_list = []
+    
+    # Process each feature (row in transposed data)
+    for i, column in enumerate(np_array_data):
         # Standardize the data before STFT
         data_scaler = StandardScaler()
         standardized_values = data_scaler.fit_transform(column.reshape(-1, 1)).flatten()
-
+        
         # Apply STFT to the standardized signal
-        _, _, Zxx_orig = signal.stft(standardized_values, fs=1.0, nperseg=nperseg, noverlap=noverlap, nfft=64)
-        spec_orig = np.abs(Zxx_orig)  # Get magnitude
-
-        spectra_list.append(spec_orig)
-
-    # Convert the list of spectra to a NumPy array, which is the desired output
+        f, t, Zxx = signal.stft(
+            standardized_values, 
+            fs=1.0, 
+            nperseg=nperseg, 
+            noverlap=noverlap, 
+            nfft=nfft,
+            boundary='zeros',
+            padded=True
+        )
+        
+        # Get magnitude spectrum
+        spec = np.abs(Zxx)
+        
+        # Take only first 64 frequency bins (removing DC component if needed)
+        spec = spec[:64, :]
+        
+        # Resize time dimension to exactly target_width using interpolation
+        if spec.shape[1] != target_width:
+            # Use linear interpolation to resize
+            from scipy.interpolate import interp2d
+            x_old = np.arange(spec.shape[1])
+            y_old = np.arange(spec.shape[0])
+            x_new = np.linspace(0, spec.shape[1]-1, target_width)
+            y_new = y_old
+            
+            # Create interpolation function
+            f_interp = interp2d(x_old, y_old, spec, kind='linear')
+            spec = f_interp(x_new, y_new)
+        
+        # Ensure the shape is exactly (64, target_width)
+        if spec.shape[0] > 64:
+            spec = spec[:64, :]
+        elif spec.shape[0] < 64:
+            # Pad with zeros if needed
+            padding = np.zeros((64 - spec.shape[0], spec.shape[1]))
+            spec = np.vstack([spec, padding])
+            
+        spectra_list.append(spec)
+    
+    # Stack all spectra along first dimension
     spectra = np.stack(spectra_list, axis=0)
-
+    
     return spectra
+
+
+def get_STFT_spectra_rectangular(np_array_data, context_length) -> np.array:
+    """
+    Generate rectangular STFT spectrograms optimized for specific context lengths.
+    
+    Args:
+        np_array_data: Input time series data of shape (time_steps, features)
+        context_length: Desired width of spectrogram (96, 192, 336, or 720)
+    
+    Returns:
+        Spectrogram of shape (num_features, 64, context_length)
+    """
+    return get_STFT_spectra(np_array_data, target_width=context_length)
