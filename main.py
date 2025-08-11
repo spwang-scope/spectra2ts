@@ -482,7 +482,7 @@ def test(args, peeking=False, model=None):
 
     # Calculate metrics
     mae, mse, rmse, mape, mspe = metric(preds, trues)
-    print(f'MSE: {mse:.7f}, MAE: {mae:.7f}')
+    logger.info(f'MSE: {mse:.7f}, MAE: {mae:.7f}')
     
     # Save results
     os.makedirs(args.output_dir, exist_ok=True)
