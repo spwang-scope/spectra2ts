@@ -58,13 +58,9 @@ def get_STFT_spectra(np_array_data, target_width=None) -> np.array:
     
     # Process each feature (row in transposed data)
     for i, column in enumerate(np_array_data):
-        # Standardize the data before STFT
-        data_scaler = StandardScaler()
-        standardized_values = data_scaler.fit_transform(column.reshape(-1, 1)).flatten()
-        
-        # Apply STFT to the standardized signal
+        # Apply STFT to the signal (removed double normalization)
         f, t, Zxx = signal.stft(
-            standardized_values, 
+            column, 
             fs=1.0, 
             nperseg=nperseg, 
             noverlap=noverlap, 

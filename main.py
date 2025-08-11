@@ -329,11 +329,6 @@ def train(args):
                 # Single variable prediction: use last feature only
                 batch_y = batch_y[:, :args.prediction_length, -1:].to(device)
             
-            # Debug shapes
-            if i == 0:  # Print shapes for first batch only
-                logger.info(f"Debug shapes - outputs: {outputs.shape}, batch_y: {batch_y.shape}")
-                logger.info(f"batch_x shape: {batch_x.shape}")
-            
             # Check for empty tensors
             if outputs.numel() == 0:
                 logger.error(f"Empty outputs tensor! Shape: {outputs.shape}")

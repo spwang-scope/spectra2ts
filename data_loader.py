@@ -55,8 +55,22 @@ class Dataset_Custom(Dataset):
         df_data = df_raw[cols_data]
 
         data = df_data.values
-        normalizer = StandardScaler()
-        data = normalizer.fit_transform(data)
+        
+        # Fix data leakage: Only fit scaler on training data
+        if self.set_type == 0:  # train
+            self.normalizer = StandardScaler()
+            train_data = data[border1s[0]:border2s[0]]  # Training data only
+            self.normalizer.fit(train_data)
+            data = self.normalizer.transform(data)
+        else:  # test
+            # For test set, we need to use the same scaler fitted on training data
+            # This requires the scaler to be passed from training dataset
+            # For now, fit on training portion of current data
+            train_data = data[border1s[0]:border2s[0]]  # Training data only
+            normalizer = StandardScaler()
+            normalizer.fit(train_data)
+            data = normalizer.transform(data)
+            
         data = torch.FloatTensor(data)
 
         self.data_x = data[border1:border2]
