@@ -157,9 +157,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         # Project encoder output to decoder dimension for cross-attention
         self.encoder_projection = nn.Linear(encoder_dim, d_model)
         
-        # Project context condition (last feature of context) to decoder dimension
-        self.context_condition_projection = nn.Linear(context_length, d_model)
-        
         # Custom transformer decoder layers with cross-attention
         self.decoder_layers = nn.ModuleList([
             TransformerDecoderLayer(
@@ -192,7 +189,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
     def forward(
         self, 
         encoder_output: torch.Tensor,
-        context_condition: torch.Tensor,
+        context_condition: Optional[torch.Tensor] = None,
         target: Optional[torch.Tensor] = None,
         use_teacher_forcing: bool = True
     ) -> torch.Tensor:
@@ -201,7 +198,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         
         Args:
             encoder_output: Output from ViT encoder (batch_size, num_patches+1, encoder_dim)
-            context_condition: Last feature column of context (batch_size, context_length)
+            context_condition: Not used in conventional approach, kept for compatibility
             target: Ground truth for teacher forcing (batch_size, prediction_length, time_series_dim)
             use_teacher_forcing: Whether to use teacher forcing (True during training)
             
@@ -211,15 +208,9 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         batch_size = encoder_output.size(0)
         device = encoder_output.device
         
-        # Project encoder output for cross-attention K, V
+        # Project encoder output for cross-attention K, V (conventional approach)
         memory = self.encoder_projection(encoder_output)  # (batch_size, num_patches+1, d_model)
-        
-        # Project context condition and add to memory as additional context
-        context_vec = self.context_condition_projection(context_condition)  # (batch_size, d_model)
-        context_vec = context_vec.unsqueeze(1)  # (batch_size, 1, d_model)
-        
-        # Combine encoder output with context condition for cross-attention
-        memory = torch.cat([memory, context_vec], dim=1)  # (batch_size, num_patches+2, d_model)
+        # Memory sequence: [CLS, patch1, patch2, ..., patchN] - conventional ViT token order
         
         if use_teacher_forcing and target is not None:
             # Teacher forcing: use ground truth as input
