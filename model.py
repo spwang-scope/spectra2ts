@@ -180,6 +180,86 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         # Learnable start token
         self.start_token = nn.Parameter(torch.randn(1, 1, time_series_dim))
         
+        # Initialize parameters with better initialization schemes
+        self._initialize_parameters()
+    
+    def _initialize_parameters(self):
+        """
+        Initialize decoder parameters with better schemes for gradient sensitivity.
+        """
+        # Initialize start token with small values close to expected range
+        nn.init.normal_(self.start_token, mean=0.0, std=0.02)
+        
+        # Initialize value embedding layer
+        nn.init.xavier_uniform_(self.value_embedding.weight)
+        nn.init.constant_(self.value_embedding.bias, 0.0)
+        
+        # Initialize encoder projection
+        nn.init.xavier_uniform_(self.encoder_projection.weight)
+        nn.init.constant_(self.encoder_projection.bias, 0.0)
+        
+        # Initialize transformer decoder layers with scaled initialization
+        for layer in self.decoder_layers:
+            # Self-attention
+            self._init_multihead_attention(layer.self_attn)
+            # Cross-attention  
+            self._init_multihead_attention(layer.cross_attn)
+            # Feed-forward layers
+            self._init_feedforward(layer.ffn)
+            # Layer norms
+            nn.init.constant_(layer.norm1.weight, 1.0)
+            nn.init.constant_(layer.norm1.bias, 0.0)
+            nn.init.constant_(layer.norm2.weight, 1.0)
+            nn.init.constant_(layer.norm2.bias, 0.0)
+            nn.init.constant_(layer.norm3.weight, 1.0)
+            nn.init.constant_(layer.norm3.bias, 0.0)
+        
+        # Initialize output projection with smaller weights for stable training
+        for i, layer in enumerate(self.output_projection):
+            if isinstance(layer, nn.Linear):
+                if i == len(self.output_projection) - 1:  # Final layer
+                    # Smaller initialization for final output layer
+                    nn.init.xavier_uniform_(layer.weight, gain=0.01)
+                    nn.init.constant_(layer.bias, 0.0)
+                else:
+                    nn.init.xavier_uniform_(layer.weight)
+                    nn.init.constant_(layer.bias, 0.0)
+    
+    def _init_multihead_attention(self, attention_layer):
+        """Initialize multihead attention layer with proper scaling."""
+        # Access the underlying linear layers
+        # MultiheadAttention has in_proj_weight (for Q, K, V) and out_proj
+        if hasattr(attention_layer, 'in_proj_weight') and attention_layer.in_proj_weight is not None:
+            # Combined Q, K, V projection
+            nn.init.xavier_uniform_(attention_layer.in_proj_weight)
+        else:
+            # Separate Q, K, V projections
+            if hasattr(attention_layer, 'q_proj_weight'):
+                nn.init.xavier_uniform_(attention_layer.q_proj_weight)
+            if hasattr(attention_layer, 'k_proj_weight'):
+                nn.init.xavier_uniform_(attention_layer.k_proj_weight) 
+            if hasattr(attention_layer, 'v_proj_weight'):
+                nn.init.xavier_uniform_(attention_layer.v_proj_weight)
+        
+        # Initialize biases
+        if hasattr(attention_layer, 'in_proj_bias') and attention_layer.in_proj_bias is not None:
+            nn.init.constant_(attention_layer.in_proj_bias, 0.0)
+        
+        # Output projection
+        nn.init.xavier_uniform_(attention_layer.out_proj.weight, gain=1/math.sqrt(2))  # Residual scaling
+        nn.init.constant_(attention_layer.out_proj.bias, 0.0)
+    
+    def _init_feedforward(self, ffn_module):
+        """Initialize feed-forward network with residual scaling."""
+        for i, layer in enumerate(ffn_module):
+            if isinstance(layer, nn.Linear):
+                if i == len(ffn_module) - 1:  # Final layer in FFN
+                    # Scale down final layer for residual connections
+                    nn.init.xavier_uniform_(layer.weight, gain=1/math.sqrt(2))
+                else:
+                    nn.init.xavier_uniform_(layer.weight)
+                nn.init.constant_(layer.bias, 0.0)
+        
     def _generate_square_subsequent_mask(self, sz: int, device: torch.device) -> torch.Tensor:
         """Generate causal mask for autoregressive generation."""
         mask = torch.triu(torch.ones(sz, sz, device=device), diagonal=1)
