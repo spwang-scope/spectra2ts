@@ -59,7 +59,7 @@ def parse_arguments():
                        help="Length of time series to predict")
     parser.add_argument("--context_length", type=int, default=96,
                        help="Length of context window")
-    parser.add_argument("--feature_projection_dim", type=int, default=256,
+    parser.add_argument("--feature_projection_dim", type=int, default=128,
                        help="Dimension for CORAL feature projection")
     parser.add_argument("--time_series_dim", type=int, default=1,
                        help="Dimension of time series (1 for univariate)")
@@ -353,7 +353,7 @@ def train(args):
         train_loss = np.average(train_loss)
         
         # Evaluate on test set
-        test_loss = test(args, peeking=True, model=model)
+        test_loss = test(args, peeking=True, model=model, epoch=epoch)
         
         logger.info(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.7f} Test Loss: {test_loss:.7f}")
         
@@ -386,7 +386,7 @@ def train(args):
     logger.info("Training completed!")
 
 
-def test(args, peeking=False, model=None):
+def test(args, peeking=False, model=None, epoch=None):
     """Test the model using inference mode (no teacher forcing)."""
     
     device = get_device(args.device, args.cuda_num)
@@ -449,20 +449,16 @@ def test(args, peeking=False, model=None):
             
             preds.append(pred)
             trues.append(true)
-            
-            if i % 20 == 0 and not peeking:
+
+            if (i % 20 == 0 and (epoch + 1) % 10 == 0 and peeking):
                 input = batch_x.detach().cpu().numpy()
                 gt = np.concatenate((input[0, :args.context_length, -1], true[0, :, -1]), axis=0)
                 pd = np.concatenate((input[0, :args.context_length, -1], pred[0, :, -1]), axis=0)
-                visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}.png'))
-            
+                visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch}.png'))
+
             total_loss.append(loss.item())
             
     avg_loss = np.average(total_loss)
-
-    if peeking:
-        model.train()  # Return to training mode
-        return avg_loss
 
     # Concatenate all predictions and ground truth
     preds = np.concatenate(preds, axis=0)
@@ -481,15 +477,19 @@ def test(args, peeking=False, model=None):
     print(f"True range: {trues.min():.6f} to {trues.max():.6f}")
 
     # Calculate metrics
-    mae, mse, rmse, mape, mspe = metric(preds, trues)
+    mae, mse, _, _, _ = metric(preds, trues)
     logger.info(f'MSE: {mse:.7f}, MAE: {mae:.7f}')
+    
+    if peeking:
+        model.train()  # Return to training mode
+        return avg_loss
     
     # Save results
     os.makedirs(args.output_dir, exist_ok=True)
     with open(os.path.join(args.output_dir, "test_results.txt"), 'w') as f:
-        f.write(f'MSE: {mse:.7f}, MAE: {mae:.7f}, RMSE: {rmse:.7f}, MAPE: {mape:.7f}, MSPE: {mspe:.7f}\n')
+        f.write(f'MSE: {mse:.7f}, MAE: {mae:.7f}\n')
 
-    np.save(os.path.join(args.output_dir, 'test_metrics.npy'), np.array([mae, mse, rmse, mape, mspe]))
+    np.save(os.path.join(args.output_dir, 'test_metrics.npy'), np.array([mae, mse]))
     np.save(os.path.join(args.output_dir, 'test_pred.npy'), preds)
     np.save(os.path.join(args.output_dir, 'test_true.npy'), trues)
 

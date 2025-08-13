@@ -131,7 +131,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
     
     def __init__(
         self,
-        d_model: int = 256,
+        d_model: int = 64,
         nhead: int = 8,
         num_layers: int = 4,
         dim_feedforward: int = 1024,
@@ -294,9 +294,9 @@ class ViTToTimeSeriesModel(nn.Module):
         num_channels: int = 3,
         prediction_length: int = 96,
         context_length: int = 96,
-        feature_projection_dim: int = 256,
+        feature_projection_dim: int = 128,
         time_series_dim: int = 1,
-        ts_model_dim: int = 256,
+        ts_model_dim: int = 64,
         ts_num_heads: int = 8,
         ts_num_layers: int = 4,
         ts_dim_feedforward: int = 1024,
