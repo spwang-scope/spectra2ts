@@ -410,10 +410,10 @@ class ViTToTimeSeriesModel(nn.Module):
         self.register_buffer('image_mean', torch.tensor(image_mean).view(1, 3, 1, 1))
         self.register_buffer('image_std', torch.tensor(image_std).view(1, 3, 1, 1))
         
-        # Rectangular ViT Encoder (width = context_length)
+        # Rectangular ViT Encoder (128x128 spectrograms)
         self.vit_encoder = create_rectangular_vit(
-            image_height=64,  # Fixed height for spectrograms
-            image_width=context_length,  # Width matches context length
+            image_height=128,  # Updated height for resized spectrograms
+            image_width=128,  # Updated width for resized spectrograms
             in_channels=num_channels,
             embed_dim=768,
             depth=12,
@@ -422,13 +422,16 @@ class ViTToTimeSeriesModel(nn.Module):
             dropout=0.1
         )
         
-        # CORAL Domain Bridge
+        # CORAL Domain Bridge (kept for compatibility but not used)
         vit_hidden_size = 768  # Default ViT hidden size
         self.domain_bridge = CorrelationAlignment(
             input_dim=vit_hidden_size,
             output_dim=feature_projection_dim,
             use_bias=False
         )
+        
+        # Linear projection to replace CORAL bridge
+        self.encoder_projection = nn.Linear(vit_hidden_size, feature_projection_dim)
         
         # Transformer Decoder with Cross-Attention
         self.ts_decoder = TransformerDecoderWithCrossAttention(
@@ -440,7 +443,7 @@ class ViTToTimeSeriesModel(nn.Module):
             prediction_length=prediction_length,
             context_length=context_length,
             time_series_dim=time_series_dim,
-            encoder_dim=768,  # ViT encoder output dimension (CORAL skipped)
+            encoder_dim=feature_projection_dim,  # After linear projection
         )
     
     def encode_spectrogram_to_features(self, spectrogram: torch.Tensor) -> torch.Tensor:
@@ -487,8 +490,9 @@ class ViTToTimeSeriesModel(nn.Module):
         # Stack into batch tensor
         spectra_tensor = torch.stack(spectra_list, dim=0)  # (batch, channels, 64, context_length)
         
-        # Encode spectrograms to features
-        encoder_features = self.encode_spectrogram_to_features(spectra_tensor)
+        # Encode spectrograms to features (skip CORAL, use linear projection)
+        vit_features = self.vit_encoder.get_last_hidden_state(spectra_tensor)  # (batch, num_patches+1, 768)
+        encoder_features = self.encoder_projection(vit_features)  # (batch, num_patches+1, feature_projection_dim)
         
         if mode == 'train':
             # Teacher forcing: use ground truth target (based on time_series_dim)
