@@ -440,29 +440,24 @@ class ViTToTimeSeriesModel(nn.Module):
             prediction_length=prediction_length,
             context_length=context_length,
             time_series_dim=time_series_dim,
-            encoder_dim=feature_projection_dim,  # After CORAL projection
+            encoder_dim=768,  # ViT encoder output dimension (CORAL skipped)
         )
     
     def encode_spectrogram_to_features(self, spectrogram: torch.Tensor) -> torch.Tensor:
         """
-        Encode spectrogram to feature representation using ViT and CORAL.
+        Encode spectrogram to feature representation using ViT (CORAL bridge skipped).
         
         Args:
             spectrogram: Spectrogram tensor (batch_size, channels, height=64, width=context_length)
             
         Returns:
-            Encoded features (batch_size, num_patches+1, feature_projection_dim)
+            Encoded features (batch_size, num_patches+1, 768)
         """
         # Get all token features from ViT
         vit_features = self.vit_encoder.get_last_hidden_state(spectrogram)  # (batch, num_patches+1, 768)
         
-        # Apply CORAL bridging to all tokens
-        batch_size, num_tokens, _ = vit_features.shape
-        vit_features_flat = vit_features.reshape(-1, vit_features.size(-1))
-        bridged_features_flat = self.domain_bridge(vit_features_flat)
-        bridged_features = bridged_features_flat.reshape(batch_size, num_tokens, -1)
-        
-        return bridged_features
+        # Skip CORAL domain bridge - return ViT features directly
+        return vit_features
     
     def forward(self, context: torch.Tensor, tf_target: torch.Tensor = None, mode: str = 'train') -> torch.Tensor:
         """

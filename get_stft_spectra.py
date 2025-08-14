@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import signal
 from sklearn.preprocessing import StandardScaler
+from skimage.transform import resize
 
 def get_STFT_spectra(np_array_data, target_width=None) -> np.array:
     """
@@ -16,7 +17,7 @@ def get_STFT_spectra(np_array_data, target_width=None) -> np.array:
                      If None, uses automatic calculation
     
     Returns:
-        Spectrogram of shape (num_features, 64, target_width)
+        Spectrogram of shape (num_features, 128, 128)
     """
     
     # Since we want to iterate column by column, we could only firstly transpose it,
@@ -31,9 +32,9 @@ def get_STFT_spectra(np_array_data, target_width=None) -> np.array:
         target_width = time_length
     
     # Calculate STFT parameters to get desired width
-    # We want frequency dimension to be 64 (using nfft=128 gives us 65 freq bins, we'll take 64)
+    # We want frequency dimension to be 32 (using nfft=64 gives us 33 freq bins, we'll take 32)
     # For the time dimension, we need to calculate nperseg and noverlap
-    nfft = 128  # This gives us 65 frequency bins (we'll use 64)
+    nfft = 64  # This gives us 33 frequency bins (we'll use 32)
     
     # Calculate nperseg and noverlap to achieve target_width time frames
     # Formula: num_frames = (signal_length - nperseg) / (nperseg - noverlap) + 1
@@ -72,8 +73,8 @@ def get_STFT_spectra(np_array_data, target_width=None) -> np.array:
         # Get magnitude spectrum
         spec = np.abs(Zxx)
         
-        # Take only first 64 frequency bins (removing DC component if needed)
-        spec = spec[:64, :]
+        # Take only first 32 frequency bins (removing DC component if needed)
+        spec = spec[:32, :]
         
         # Resize time dimension to exactly target_width using interpolation
         if spec.shape[1] != target_width:
@@ -88,13 +89,16 @@ def get_STFT_spectra(np_array_data, target_width=None) -> np.array:
             f_interp = interp2d(x_old, y_old, spec, kind='linear')
             spec = f_interp(x_new, y_new)
         
-        # Ensure the shape is exactly (64, target_width)
-        if spec.shape[0] > 64:
-            spec = spec[:64, :]
-        elif spec.shape[0] < 64:
+        # Ensure the shape is exactly (32, target_width)
+        if spec.shape[0] > 32:
+            spec = spec[:32, :]
+        elif spec.shape[0] < 32:
             # Pad with zeros if needed
-            padding = np.zeros((64 - spec.shape[0], spec.shape[1]))
+            padding = np.zeros((32 - spec.shape[0], spec.shape[1]))
             spec = np.vstack([spec, padding])
+        
+        # Resize spectrum to 128x128 using bilinear interpolation
+        spec = resize(spec, (128, 128), order=1, preserve_range=True)
             
         spectra_list.append(spec)
     
@@ -113,6 +117,6 @@ def get_STFT_spectra_rectangular(np_array_data, context_length) -> np.array:
         context_length: Desired width of spectrogram (96, 192, 336, or 720)
     
     Returns:
-        Spectrogram of shape (num_features, 64, context_length)
+        Spectrogram of shape (num_features, 128, 128)
     """
     return get_STFT_spectra(np_array_data, target_width=context_length)
