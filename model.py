@@ -18,8 +18,11 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vit_encoder import RectangularViT, create_rectangular_vit
-from get_stft_spectra import get_STFT_spectra_rectangular
+from pytorch_stft import get_STFT_spectra  # Importing the STFT function from pytorch_stft.py
 from bridge import CorrelationAlignment
+
+import numpy as np
+import matplotlib.pyplot as plt
 
 
 class PositionalEncoding(nn.Module):
@@ -482,9 +485,8 @@ class ViTToTimeSeriesModel(nn.Module):
         
         # Generate spectrograms from context
         spectra_list = []
-        for item in context.cpu().numpy():
-            spectra = torch.from_numpy(get_STFT_spectra_rectangular(item, self.context_length))
-            spectra = spectra.float().to(device)
+        for item in context:
+            spectra = get_STFT_spectra(item)
             spectra_list.append(spectra)
         
         # Stack into batch tensor
