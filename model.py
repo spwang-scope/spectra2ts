@@ -416,7 +416,7 @@ class ViTToTimeSeriesModel(nn.Module):
             image_width=128,  # Updated width for resized spectrograms
             in_channels=num_channels,
             embed_dim=768,
-            depth=12,
+            depth=3,
             num_heads=12,
             mlp_ratio=4,
             dropout=0.1

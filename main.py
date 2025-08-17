@@ -67,7 +67,7 @@ def parse_arguments():
                        help="Hidden dimension for transformer decoder")
     parser.add_argument("--ts_num_heads", type=int, default=8,
                        help="Number of attention heads")
-    parser.add_argument("--ts_num_layers", type=int, default=4,
+    parser.add_argument("--ts_num_layers", type=int, default=3,
                        help="Number of decoder layers")
     parser.add_argument("--ts_dim_feedforward", type=int, default=1024,
                        help="Feed-forward dimension")
