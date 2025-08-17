@@ -66,9 +66,11 @@ class PositionalEncoding2D(nn.Module):
         
         self.register_buffer('pe', pe)
         
-    def forward(self, num_patches_h, num_patches_w):
+    def forward(self, num_patches_h, num_patches_w, device=None):
         """Get positional encoding for specific patch grid size."""
         pos_enc = self.pe[:num_patches_h, :num_patches_w, :]
+        if device is not None:
+            pos_enc = pos_enc.to(device)
         pos_enc = rearrange(pos_enc, 'h w d -> (h w) d')
         return pos_enc
 
@@ -243,7 +245,7 @@ class RectangularViT(nn.Module):
         x = torch.cat([cls_tokens, x], dim=1)  # (B, num_patches+1, embed_dim)
         
         # Add positional encoding
-        pos_enc = self.pos_encoding(self.num_patches_h, self.num_patches_w)
+        pos_enc = self.pos_encoding(self.num_patches_h, self.num_patches_w, device=x.device)
         pos_enc = torch.cat([torch.zeros_like(cls_tokens[0, 0, :]).unsqueeze(0), pos_enc], dim=0)
         x = x + pos_enc.unsqueeze(0)
         
@@ -274,7 +276,7 @@ class RectangularViT(nn.Module):
         x = torch.cat([cls_tokens, x], dim=1)
         
         # Add positional encoding
-        pos_enc = self.pos_encoding(self.num_patches_h, self.num_patches_w)
+        pos_enc = self.pos_encoding(self.num_patches_h, self.num_patches_w, device=x.device)
         pos_enc = torch.cat([torch.zeros_like(cls_tokens[0, 0, :]).unsqueeze(0), pos_enc], dim=0)
         x = x + pos_enc.unsqueeze(0)
         
