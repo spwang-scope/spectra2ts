@@ -25,6 +25,74 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+class PerItemDataNormalizer(nn.Module):
+    """Per-item data normalizer that computes statistics for each sample individually.
+    
+    This normalizer computes mean and std for each input sample separately,
+    enabling proper denormalization of predictions for samples with different scales.
+    """
+    
+    def __init__(self, target_feature_idx: int = -1):
+        super().__init__()
+        self.target_feature_idx = target_feature_idx
+        
+    def compute_stats(self, data: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute per-sample statistics.
+        
+        Args:
+            data: Tensor of shape (batch_size, seq_len, features)
+            
+        Returns:
+            mean: Tensor of shape (batch_size, 1, features)
+            std: Tensor of shape (batch_size, 1, features)
+        """
+        # Compute stats along sequence dimension for each sample
+        mean = data.mean(dim=1, keepdim=True)  # (batch_size, 1, features)
+        std = data.std(dim=1, keepdim=True)    # (batch_size, 1, features)
+        
+        # Avoid division by zero
+        std = torch.clamp(std, min=1e-8)
+        
+        return mean, std
+    
+    def normalize(self, data: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Normalize data using per-sample statistics.
+        
+        Args:
+            data: Tensor of shape (batch_size, seq_len, features)
+            
+        Returns:
+            normalized_data: Normalized tensor
+            mean: Mean used for normalization (all features)
+            target_mean: Mean of target feature only
+            target_std: Std of target feature only
+        """
+        mean, std = self.compute_stats(data)
+        
+        # Extract target feature statistics
+        target_mean = mean[:, :, self.target_feature_idx:self.target_feature_idx+1]
+        target_std = std[:, :, self.target_feature_idx:self.target_feature_idx+1]
+        
+        # Normalize all features
+        normalized_data = (data - mean) / std
+        
+        return normalized_data, mean, std, target_mean, target_std
+    
+    def denormalize_target(self, predictions: torch.Tensor, target_mean: torch.Tensor, 
+                          target_std: torch.Tensor) -> torch.Tensor:
+        """Denormalize predictions using target feature statistics.
+        
+        Args:
+            predictions: Normalized predictions (batch_size, pred_len, 1)
+            target_mean: Target feature mean (batch_size, 1, 1)
+            target_std: Target feature std (batch_size, 1, 1)
+            
+        Returns:
+            denormalized_predictions: Original scale predictions
+        """
+        return predictions * target_std + target_mean
+
+
 class PositionalEncoding(nn.Module):
     """Positional encoding for transformer."""
     
@@ -448,6 +516,9 @@ class ViTToTimeSeriesModel(nn.Module):
             time_series_dim=time_series_dim,
             encoder_dim=feature_projection_dim,  # After linear projection
         )
+        
+        # Per-item data normalizer
+        self.normalizer = PerItemDataNormalizer(target_feature_idx=-1)
     
     def encode_spectrogram_to_features(self, spectrogram: torch.Tensor) -> torch.Tensor:
         """
@@ -467,7 +538,7 @@ class ViTToTimeSeriesModel(nn.Module):
     
     def forward(self, context: torch.Tensor, tf_target: torch.Tensor = None, mode: str = 'train') -> torch.Tensor:
         """
-        Forward pass with teacher forcing for training or autoregressive for inference.
+        Forward pass with per-item normalization and denormalization.
         
         Args:
             context: Input context time series (batch_size, context_length, features)
@@ -475,17 +546,20 @@ class ViTToTimeSeriesModel(nn.Module):
             mode: 'train' for teacher forcing, 'inference' for autoregressive generation
             
         Returns:
-            Predicted time series (batch_size, prediction_length, time_series_dim)
+            Predicted time series (batch_size, prediction_length, time_series_dim) - in original scale
         """
         device = next(self.parameters()).device
         batch_size = context.size(0)
         
-        # Get last feature column of context as condition
-        context_condition = context[:, :, -1]  # (batch, context_len)
+        # Apply per-item normalization to context
+        context_norm, context_mean, context_std, target_mean, target_std = self.normalizer.normalize(context)
         
-        # Generate spectrograms from context
+        # Get last feature column of normalized context as condition
+        context_condition = context_norm[:, :, -1]  # (batch, context_len)
+        
+        # Generate spectrograms from normalized context
         spectra_list = []
-        for item in context:
+        for item in context_norm:
             spectra = get_STFT_spectra(item)
             spectra_list.append(spectra)
         
@@ -497,19 +571,22 @@ class ViTToTimeSeriesModel(nn.Module):
         encoder_features = self.encoder_projection(vit_features)  # (batch, num_patches+1, feature_projection_dim)
         
         if mode == 'train':
-            # Teacher forcing: use ground truth target (based on time_series_dim)
+            # Teacher forcing: normalize target and use ground truth target (based on time_series_dim)
             if tf_target is not None:
+                # Normalize target using same statistics as context
+                tf_target_norm, _, _, _, _ = self.normalizer.normalize(tf_target)
+                
                 if self.time_series_dim == 1:
                     # Single variable: use last feature
-                    target_features = tf_target[:, :, -1:]  # (batch, pred_len, 1)
+                    target_features = tf_target_norm[:, :, -1:]  # (batch, pred_len, 1)
                 else:
                     # Multi-variable: use last time_series_dim features
-                    target_features = tf_target[:, :, -self.time_series_dim:]  # (batch, pred_len, time_series_dim)
+                    target_features = tf_target_norm[:, :, -self.time_series_dim:]  # (batch, pred_len, time_series_dim)
             else:
                 raise ValueError("tf_target must be provided in training mode")
             
-            
-            predictions = self.ts_decoder(
+            # Get normalized predictions
+            predictions_norm = self.ts_decoder(
                 encoder_output=encoder_features,
                 context_condition=context_condition,
                 target=target_features,
@@ -517,12 +594,15 @@ class ViTToTimeSeriesModel(nn.Module):
             )
         else:
             # Inference: autoregressive generation
-            predictions = self.ts_decoder(
+            predictions_norm = self.ts_decoder(
                 encoder_output=encoder_features,
                 context_condition=context_condition,
                 target=None,
                 use_teacher_forcing=False
             )
+        
+        # Denormalize predictions to original scale using target feature statistics
+        predictions = self.normalizer.denormalize_target(predictions_norm, target_mean, target_std)
         
         return predictions
     
