@@ -74,6 +74,10 @@ class PerItemDataNormalizer(nn.Module):
         target_mean = mean[:, :, self.target_feature_idx:self.target_feature_idx+1]
         target_std = std[:, :, self.target_feature_idx:self.target_feature_idx+1]
         
+        print(f"Normalizer: target_feature_idx={self.target_feature_idx}")
+        print(f"Normalizer: mean shape={mean.shape}, target_mean shape={target_mean.shape}")
+        print(f"Normalizer: std shape={std.shape}, target_std shape={target_std.shape}")
+        
         # Normalize all features
         normalized_data = (data - mean) / std
         
@@ -628,7 +632,11 @@ class ViTToTimeSeriesModel(nn.Module):
             )
         
         # Denormalize predictions to original scale using target feature statistics
+        print(f"Before denormalization: {predictions_norm.shape}")
+        print(f"Target mean shape: {target_mean.shape}")
+        print(f"Target std shape: {target_std.shape}")
         predictions = self.normalizer.denormalize_target(predictions_norm, target_mean, target_std)
+        print(f"After denormalization: {predictions.shape}")
         
         return predictions
     
