@@ -265,6 +265,9 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             nn.Linear(d_model // 2, time_series_dim)
         )
         
+        # Debug print
+        print(f"Decoder initialized with time_series_dim={time_series_dim}, d_model={d_model}")
+        
         # Learnable start token
         self.start_token = nn.Parameter(torch.randn(1, 1, time_series_dim))
         
@@ -401,8 +404,10 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             
             # Project to output dimension and remove start token
             output = self.output_projection(output)  # (batch_size, pred_len+1, ts_dim)
+            print(f"After output projection: {output.shape}")
             
             output = output[:, 1:, :]  # Remove start token: (batch_size, pred_len, ts_dim)
+            print(f"After removing start token: {output.shape}")
             
         else:
             # Inference mode: autoregressive generation
@@ -427,6 +432,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
                 
                 # Get prediction for next time step
                 next_pred = self.output_projection(output[:, -1:, :])  # (batch_size, 1, ts_dim)
+                print(f"Inference step {step}: next_pred shape: {next_pred.shape}")
                 predictions.append(next_pred)
                 
                 # Append prediction to input for next iteration
@@ -520,6 +526,9 @@ class ViTToTimeSeriesModel(nn.Module):
         
         # Linear projection to replace CORAL bridge
         self.encoder_projection = nn.Linear(vit_hidden_size, feature_projection_dim)
+        
+        # Debug print
+        print(f"Main model initialized with time_series_dim={time_series_dim}")
         
         # Transformer Decoder with Cross-Attention
         self.ts_decoder = TransformerDecoderWithCrossAttention(
