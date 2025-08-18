@@ -71,8 +71,12 @@ class PerItemDataNormalizer(nn.Module):
         mean, std = self.compute_stats(data)
         
         # Extract target feature statistics
-        target_mean = mean[:, :, self.target_feature_idx:self.target_feature_idx+1]
-        target_std = std[:, :, self.target_feature_idx:self.target_feature_idx+1]
+        if self.target_feature_idx == -1:
+            target_mean = mean[:, :, -1:]
+            target_std = std[:, :, -1:]
+        else:
+            target_mean = mean[:, :, self.target_feature_idx:self.target_feature_idx+1]
+            target_std = std[:, :, self.target_feature_idx:self.target_feature_idx+1]
         
         print(f"Normalizer: target_feature_idx={self.target_feature_idx}")
         print(f"Normalizer: mean shape={mean.shape}, target_mean shape={target_mean.shape}")
@@ -102,6 +106,8 @@ class PerItemDataNormalizer(nn.Module):
         Returns:
             denormalized_predictions: Original scale predictions
         """
+        # Ensure target_mean and target_std have the same shape as predictions for broadcasting
+        # target_mean/std: (batch_size, 1, 1) -> should broadcast to (batch_size, pred_len, 1)
         denormalized = predictions * target_std + target_mean
         
         # Check for invalid values
