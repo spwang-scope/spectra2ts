@@ -78,19 +78,10 @@ class PerItemDataNormalizer(nn.Module):
             target_mean = mean[:, :, self.target_feature_idx:self.target_feature_idx+1]
             target_std = std[:, :, self.target_feature_idx:self.target_feature_idx+1]
         
-        print(f"Normalizer: target_feature_idx={self.target_feature_idx}")
-        print(f"Normalizer: mean shape={mean.shape}, target_mean shape={target_mean.shape}")
-        print(f"Normalizer: std shape={std.shape}, target_std shape={target_std.shape}")
         
         # Normalize all features
         normalized_data = (data - mean) / std
         
-        # Check for invalid values
-        if torch.isnan(normalized_data).any() or torch.isinf(normalized_data).any():
-            print(f"Warning: Invalid values in normalized data")
-            print(f"Mean range: {mean.min():.6f} to {mean.max():.6f}")
-            print(f"Std range: {std.min():.6f} to {std.max():.6f}")
-            print(f"Data range: {data.min():.6f} to {data.max():.6f}")
         
         return normalized_data, mean, std, target_mean, target_std
     
@@ -110,12 +101,6 @@ class PerItemDataNormalizer(nn.Module):
         # target_mean/std: (batch_size, 1, 1) -> should broadcast to (batch_size, pred_len, 1)
         denormalized = predictions * target_std + target_mean
         
-        # Check for invalid values
-        if torch.isnan(denormalized).any() or torch.isinf(denormalized).any():
-            print(f"Warning: Invalid values in denormalized predictions")
-            print(f"Predictions range: {predictions.min():.6f} to {predictions.max():.6f}")
-            print(f"Target mean range: {target_mean.min():.6f} to {target_mean.max():.6f}")
-            print(f"Target std range: {target_std.min():.6f} to {target_std.max():.6f}")
         
         return denormalized
 
@@ -275,8 +260,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             nn.Linear(d_model // 2, time_series_dim)
         )
         
-        # Debug print
-        print(f"Decoder initialized with time_series_dim={time_series_dim}, d_model={d_model}")
         
         # Learnable start token
         self.start_token = nn.Parameter(torch.randn(1, 1, time_series_dim))
@@ -414,10 +397,8 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             
             # Project to output dimension and remove start token
             output = self.output_projection(output)  # (batch_size, pred_len+1, ts_dim)
-            print(f"After output projection: {output.shape}")
             
             output = output[:, 1:, :]  # Remove start token: (batch_size, pred_len, ts_dim)
-            print(f"After removing start token: {output.shape}")
             
         else:
             # Inference mode: autoregressive generation
@@ -442,7 +423,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
                 
                 # Get prediction for next time step
                 next_pred = self.output_projection(output[:, -1:, :])  # (batch_size, 1, ts_dim)
-                print(f"Inference step {step}: next_pred shape: {next_pred.shape}")
                 predictions.append(next_pred)
                 
                 # Append prediction to input for next iteration
@@ -537,8 +517,6 @@ class ViTToTimeSeriesModel(nn.Module):
         # Linear projection to replace CORAL bridge
         self.encoder_projection = nn.Linear(vit_hidden_size, feature_projection_dim)
         
-        # Debug print
-        print(f"Main model initialized with time_series_dim={time_series_dim}")
         
         # Transformer Decoder with Cross-Attention
         self.ts_decoder = TransformerDecoderWithCrossAttention(
@@ -638,11 +616,7 @@ class ViTToTimeSeriesModel(nn.Module):
             )
         
         # Denormalize predictions to original scale using target feature statistics
-        print(f"Before denormalization: {predictions_norm.shape}")
-        print(f"Target mean shape: {target_mean.shape}")
-        print(f"Target std shape: {target_std.shape}")
         predictions = self.normalizer.denormalize_target(predictions_norm, target_mean, target_std)
-        print(f"After denormalization: {predictions.shape}")
         
         return predictions
     
