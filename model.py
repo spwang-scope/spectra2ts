@@ -48,14 +48,14 @@ class PerItemDataNormalizer(nn.Module):
         """
         # Compute stats along sequence dimension for each sample
         mean = data.mean(dim=1, keepdim=True)  # (batch_size, 1, features)
-        std = data.std(dim=1, keepdim=True)    # (batch_size, 1, features)
+        std = data.std(dim=1, keepdim=True, unbiased=False)    # (batch_size, 1, features)
         
-        # Avoid division by zero
-        std = torch.clamp(std, min=1e-8)
+        # Avoid division by zero with better clamping
+        std = torch.clamp(std, min=1e-6)
         
         return mean, std
     
-    def normalize(self, data: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def normalize(self, data: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Normalize data using per-sample statistics.
         
         Args:
@@ -64,6 +64,7 @@ class PerItemDataNormalizer(nn.Module):
         Returns:
             normalized_data: Normalized tensor
             mean: Mean used for normalization (all features)
+            std: Std used for normalization (all features)
             target_mean: Mean of target feature only
             target_std: Std of target feature only
         """
@@ -75,6 +76,13 @@ class PerItemDataNormalizer(nn.Module):
         
         # Normalize all features
         normalized_data = (data - mean) / std
+        
+        # Check for invalid values
+        if torch.isnan(normalized_data).any() or torch.isinf(normalized_data).any():
+            print(f"Warning: Invalid values in normalized data")
+            print(f"Mean range: {mean.min():.6f} to {mean.max():.6f}")
+            print(f"Std range: {std.min():.6f} to {std.max():.6f}")
+            print(f"Data range: {data.min():.6f} to {data.max():.6f}")
         
         return normalized_data, mean, std, target_mean, target_std
     
@@ -90,7 +98,16 @@ class PerItemDataNormalizer(nn.Module):
         Returns:
             denormalized_predictions: Original scale predictions
         """
-        return predictions * target_std + target_mean
+        denormalized = predictions * target_std + target_mean
+        
+        # Check for invalid values
+        if torch.isnan(denormalized).any() or torch.isinf(denormalized).any():
+            print(f"Warning: Invalid values in denormalized predictions")
+            print(f"Predictions range: {predictions.min():.6f} to {predictions.max():.6f}")
+            print(f"Target mean range: {target_mean.min():.6f} to {target_mean.max():.6f}")
+            print(f"Target std range: {target_std.min():.6f} to {target_std.max():.6f}")
+        
+        return denormalized
 
 
 class PositionalEncoding(nn.Module):
