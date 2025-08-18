@@ -247,7 +247,7 @@ class RectangularViT(nn.Module):
         # Add positional encoding
         pos_enc = self.pos_encoding(self.num_patches_h, self.num_patches_w, device=x.device)
         pos_enc = torch.cat([torch.zeros_like(cls_tokens[0, 0, :]).unsqueeze(0), pos_enc], dim=0)
-        x = x + pos_enc.unsqueeze(0)
+        x = x + pos_enc.unsqueeze(0).to(x.device)
         
         x = self.embed_dropout(x)
         
@@ -278,7 +278,7 @@ class RectangularViT(nn.Module):
         # Add positional encoding
         pos_enc = self.pos_encoding(self.num_patches_h, self.num_patches_w, device=x.device)
         pos_enc = torch.cat([torch.zeros_like(cls_tokens[0, 0, :]).unsqueeze(0), pos_enc], dim=0)
-        x = x + pos_enc.unsqueeze(0)
+        x = x + pos_enc.unsqueeze(0).to(x.device)
         
         x = self.embed_dropout(x)
         

@@ -560,7 +560,7 @@ class ViTToTimeSeriesModel(nn.Module):
         # Generate spectrograms from normalized context
         spectra_list = []
         for item in context_norm:
-            spectra = get_STFT_spectra(item)
+            spectra = get_STFT_spectra(item, device=device)
             spectra_list.append(spectra)
         
         # Stack into batch tensor
