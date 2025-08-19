@@ -508,11 +508,11 @@ class ViTToTimeSeriesModel(nn.Module):
         
         # CORAL Domain Bridge (kept for compatibility but not used)
         vit_hidden_size = 768  # Default ViT hidden size
-        self.domain_bridge = CorrelationAlignment(
-            input_dim=vit_hidden_size,
-            output_dim=feature_projection_dim,
-            use_bias=False
-        )
+        #self.domain_bridge = CorrelationAlignment(
+        #    input_dim=vit_hidden_size,
+        #    output_dim=feature_projection_dim,
+        #    use_bias=False
+        #)
         
         # Linear projection to replace CORAL bridge
         self.encoder_projection = nn.Linear(vit_hidden_size, feature_projection_dim)

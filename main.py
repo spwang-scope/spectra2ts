@@ -172,8 +172,8 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
     """Create optimizer and learning rate scheduler."""
     # Different learning rates for different components
     param_groups = [
-        {"params": model.vit_encoder.parameters(), "lr": args.learning_rate * 0.1},
-        {"params": model.domain_bridge.parameters(), "lr": args.learning_rate},
+        {"params": model.vit_encoder.parameters(), "lr": args.learning_rate},
+        # {"params": model.domain_bridge.parameters(), "lr": args.learning_rate},
         {"params": model.ts_decoder.parameters(), "lr": args.learning_rate},
     ]
     
