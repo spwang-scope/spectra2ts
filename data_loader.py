@@ -6,7 +6,6 @@ import re
 import torch
 from torch.utils.data import Dataset, DataLoader
 import warnings
-from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings('ignore')
 
@@ -55,8 +54,6 @@ class Dataset_Custom(Dataset):
         df_data = df_raw[cols_data]
 
         data = df_data.values
-        normalizer = StandardScaler()
-        data = normalizer.fit_transform(data)
         data = torch.FloatTensor(data)
 
         self.data_x = data[border1:border2]

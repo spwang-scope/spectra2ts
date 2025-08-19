@@ -25,84 +25,167 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-class PerItemDataNormalizer(nn.Module):
-    """Per-item data normalizer that computes statistics for each sample individually.
+class RevINLayer(nn.Module):
+    """
+    Reversible Instance Normalization (RevIN) with configurable target feature support
     
-    This normalizer computes mean and std for each input sample separately,
-    enabling proper denormalization of predictions for samples with different scales.
+    Follows original RevIN spec but allows selecting which feature's statistics 
+    to use for denormalization in univariate prediction tasks.
+    
+    Reference: "Reversible Instance Normalization for Accurate Time-Series Forecasting 
+    against Distribution Shift" (NeurIPS 2022)
     """
     
-    def __init__(self, target_feature_idx: int = -1):
+    def __init__(self, num_features: int, target_feature_idx: int = -1, eps: float = 1e-5, affine: bool = True):
+        """
+        Initialize RevIN layer with target feature selection.
+        
+        Args:
+            num_features: Number of features/channels in the input
+            target_feature_idx: Index of target feature for denormalization (-1 for last feature)
+            eps: Small constant for numerical stability
+            affine: Whether to use learnable affine parameters (γ, β)
+        """
         super().__init__()
+        self.num_features = num_features
         self.target_feature_idx = target_feature_idx
+        self.eps = eps
+        self.affine = affine
         
-    def compute_stats(self, data: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute per-sample statistics.
+        if self.affine:
+            # Learnable affine parameters - shape (num_features,)
+            self.weight = nn.Parameter(torch.ones(num_features))
+            self.bias = nn.Parameter(torch.zeros(num_features))
         
-        Args:
-            data: Tensor of shape (batch_size, seq_len, features)
-            
-        Returns:
-            mean: Tensor of shape (batch_size, 1, features)
-            std: Tensor of shape (batch_size, 1, features)
-        """
-        # Compute stats along sequence dimension for each sample
-        mean = data.mean(dim=1, keepdim=True)  # (batch_size, 1, features)
-        std = data.std(dim=1, keepdim=True, unbiased=False)    # (batch_size, 1, features)
+        # Storage for ALL feature statistics (RevIN spec compliance)
+        self.mean = None  # (batch_size, 1, num_features)
+        self.std = None   # (batch_size, 1, num_features)
         
-        # Avoid division by zero with better clamping
-        std = torch.clamp(std, min=1e-6)
-        
-        return mean, std
+        # Storage for TARGET feature statistics (for univariate denormalization)
+        self.target_mean = None  # (batch_size, 1, 1)
+        self.target_std = None   # (batch_size, 1, 1)
     
-    def normalize(self, data: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Normalize data using per-sample statistics.
+    def forward(self, x: torch.Tensor, mode: str = 'norm', target_only: bool = False) -> torch.Tensor:
+        """
+        Forward pass with RevIN normalization/denormalization.
         
         Args:
-            data: Tensor of shape (batch_size, seq_len, features)
+            x: Input tensor 
+               - For mode='norm': (batch_size, seq_len, num_features)
+               - For mode='denorm' with target_only=True: (batch_size, seq_len, 1)
+               - For mode='denorm' with target_only=False: (batch_size, seq_len, num_features)
+            mode: 'norm' for normalization, 'denorm' for denormalization
+            target_only: If True, denormalize using only target feature statistics
             
         Returns:
-            normalized_data: Normalized tensor
-            mean: Mean used for normalization (all features)
-            std: Std used for normalization (all features)
-            target_mean: Mean of target feature only
-            target_std: Std of target feature only
+            Processed tensor with same shape as input
         """
-        mean, std = self.compute_stats(data)
-        
-        # Extract target feature statistics
-        if self.target_feature_idx == -1:
-            target_mean = mean[:, :, -1:]
-            target_std = std[:, :, -1:]
+        if mode == 'norm':
+            return self._normalize(x)
+        elif mode == 'denorm':
+            return self._denormalize(x, target_only=target_only)
         else:
-            target_mean = mean[:, :, self.target_feature_idx:self.target_feature_idx+1]
-            target_std = std[:, :, self.target_feature_idx:self.target_feature_idx+1]
-        
-        
-        # Normalize all features
-        normalized_data = (data - mean) / std
-        
-        
-        return normalized_data, mean, std, target_mean, target_std
+            raise ValueError(f"Unknown mode: {mode}. Use 'norm' or 'denorm'.")
     
-    def denormalize_target(self, predictions: torch.Tensor, target_mean: torch.Tensor, 
-                          target_std: torch.Tensor) -> torch.Tensor:
-        """Denormalize predictions using target feature statistics.
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply instance normalization to ALL features (follows RevIN spec).
         
         Args:
-            predictions: Normalized predictions (batch_size, pred_len, 1)
-            target_mean: Target feature mean (batch_size, 1, 1)
-            target_std: Target feature std (batch_size, 1, 1)
+            x: Input tensor of shape (batch_size, seq_len, num_features)
             
         Returns:
-            denormalized_predictions: Original scale predictions
+            Normalized tensor of same shape
         """
-        # Ensure target_mean and target_std have the same shape as predictions for broadcasting
-        # target_mean/std: (batch_size, 1, 1) -> should broadcast to (batch_size, pred_len, 1)
-        denormalized = predictions * target_std + target_mean
+        # Step 1: Compute statistics for ALL features (RevIN spec)
+        self.mean = torch.mean(x, dim=1, keepdim=True)  # (batch_size, 1, num_features)
+        self.std = torch.std(x, dim=1, keepdim=True, unbiased=False)  # (batch_size, 1, num_features)
         
+        # Clamp std to avoid division by zero
+        self.std = torch.clamp(self.std, min=self.eps)
         
-        return denormalized
+        # Step 2: Extract target feature statistics for later denormalization
+        if self.target_feature_idx == -1:
+            self.target_mean = self.mean[:, :, -1:]  # (batch_size, 1, 1)
+            self.target_std = self.std[:, :, -1:]    # (batch_size, 1, 1)
+        else:
+            self.target_mean = self.mean[:, :, self.target_feature_idx:self.target_feature_idx+1]
+            self.target_std = self.std[:, :, self.target_feature_idx:self.target_feature_idx+1]
+        
+        # Step 3: Normalize ALL features
+        x_norm = (x - self.mean) / self.std
+        
+        # Step 4: Apply learnable affine transformation if enabled
+        if self.affine:
+            # Broadcast weight and bias: (num_features,) -> (1, 1, num_features)
+            weight = self.weight.view(1, 1, -1)
+            bias = self.bias.view(1, 1, -1)
+            x_norm = x_norm * weight + bias
+            
+        return x_norm
+    
+    def _denormalize(self, x: torch.Tensor, target_only: bool = False) -> torch.Tensor:
+        """
+        Reverse the normalization using stored statistics.
+        
+        Args:
+            x: Normalized tensor 
+               - If target_only=True: (batch_size, seq_len, 1) - univariate predictions
+               - If target_only=False: (batch_size, seq_len, num_features) - multivariate
+            target_only: If True, use only target feature statistics for denormalization
+            
+        Returns:
+            Denormalized tensor in original scale
+        """
+        if self.mean is None or self.std is None:
+            raise ValueError("Must call forward with mode='norm' first to compute statistics")
+        
+        if target_only:
+            # For univariate prediction: use only target feature statistics
+            if self.target_mean is None or self.target_std is None:
+                raise ValueError("Target feature statistics not computed")
+            
+            # Ensure input is univariate
+            if x.size(-1) != 1:
+                raise ValueError(f"For target_only=True, input should have 1 feature, got {x.size(-1)}")
+            
+            # Use target feature affine parameters if enabled
+            if self.affine:
+                if self.target_feature_idx == -1:
+                    target_weight = self.weight[-1:].view(1, 1, 1)  # (1, 1, 1)
+                    target_bias = self.bias[-1:].view(1, 1, 1)      # (1, 1, 1)
+                else:
+                    target_weight = self.weight[self.target_feature_idx:self.target_feature_idx+1].view(1, 1, 1)
+                    target_bias = self.bias[self.target_feature_idx:self.target_feature_idx+1].view(1, 1, 1)
+                
+                x = (x - target_bias) / target_weight
+            
+            # Denormalize using target feature statistics
+            x_denorm = x * self.target_std + self.target_mean
+            
+        else:
+            # For multivariate: use all feature statistics (standard RevIN)
+            if self.affine:
+                # Broadcast weight and bias: (num_features,) -> (1, 1, num_features)
+                weight = self.weight.view(1, 1, -1)
+                bias = self.bias.view(1, 1, -1)
+                x = (x - bias) / weight
+            
+            # Denormalize using all feature statistics
+            x_denorm = x * self.std + self.mean
+        
+        return x_denorm
+    
+    def get_target_statistics(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get target feature normalization statistics.
+        
+        Returns:
+            Tuple of (target_mean, target_std) tensors
+        """
+        if self.target_mean is None or self.target_std is None:
+            raise ValueError("Target statistics not computed yet. Call forward with mode='norm' first.")
+        return self.target_mean, self.target_std
 
 
 class PositionalEncoding(nn.Module):
@@ -531,8 +614,13 @@ class ViTToTimeSeriesModel(nn.Module):
             encoder_dim=feature_projection_dim,  # After linear projection
         )
         
-        # Per-item data normalizer
-        self.normalizer = PerItemDataNormalizer(target_feature_idx=-1)
+        # RevIN layer for instance normalization with configurable target feature
+        self.revin_layer = RevINLayer(
+            num_features=num_channels,
+            target_feature_idx=-1,  # Use last feature as target (configurable)
+            eps=1e-5,
+            affine=True
+        )
     
     def encode_spectrogram_to_features(self, spectrogram: torch.Tensor) -> torch.Tensor:
         """
@@ -552,26 +640,25 @@ class ViTToTimeSeriesModel(nn.Module):
     
     def forward(self, context: torch.Tensor, tf_target: torch.Tensor = None, mode: str = 'train') -> torch.Tensor:
         """
-        Forward pass with per-item normalization and denormalization.
+        Forward pass with RevIN normalization/denormalization.
         
         Args:
-            context: Input context time series (batch_size, context_length, features)
-            tf_target: Target time series for teacher forcing (batch_size, prediction_length, features) - only used in training
+            context: Input context time series (batch_size, context_length, num_features)
+            tf_target: Target time series for teacher forcing (batch_size, prediction_length, num_features) - only used in training
             mode: 'train' for teacher forcing, 'inference' for autoregressive generation
             
         Returns:
-            Predicted time series (batch_size, prediction_length, time_series_dim) - in original scale
+            Predicted time series (batch_size, prediction_length, 1) - in original scale of target feature
         """
         device = next(self.parameters()).device
         batch_size = context.size(0)
         
-        # Apply per-item normalization to context
-        context_norm, context_mean, context_std, target_mean, target_std = self.normalizer.normalize(context)
+        # Step 1: Apply RevIN normalization to input context (ALL features)
+        # Input shape: (batch_size, context_length, num_features)
+        context_norm = self.revin_layer(context, mode='norm')
+        # Output shape: (batch_size, context_length, num_features) - all features normalized
         
-        # Get last feature column of normalized context as condition
-        context_condition = context_norm[:, :, -1]  # (batch, context_len)
-        
-        # Generate spectrograms from normalized context
+        # Step 2: Generate spectrograms from normalized context
         spectra_list = []
         for item in context_norm:
             spectra = get_STFT_spectra(item, device=device)
@@ -580,18 +667,20 @@ class ViTToTimeSeriesModel(nn.Module):
         # Stack into batch tensor
         spectra_tensor = torch.stack(spectra_list, dim=0)  # (batch, channels, 64, context_length)
         
-        # Encode spectrograms to features (skip CORAL, use linear projection)
+        # Step 3: Process through ViT encoder
         vit_features = self.vit_encoder.get_last_hidden_state(spectra_tensor)  # (batch, num_patches+1, 768)
         encoder_features = self.encoder_projection(vit_features)  # (batch, num_patches+1, feature_projection_dim)
         
+        # Step 4: Decoder forward pass
         if mode == 'train':
-            # Teacher forcing: normalize target and use ground truth target (based on time_series_dim)
+            # Teacher forcing: prepare target features
             if tf_target is not None:
-                # Normalize target using same statistics as context
-                tf_target_norm, _, _, _, _ = self.normalizer.normalize(tf_target)
+                # Normalize target using same RevIN statistics as context
+                tf_target_norm = self.revin_layer(tf_target, mode='norm')
                 
+                # CRITICAL: Select target feature for univariate prediction
                 if self.time_series_dim == 1:
-                    # Single variable: use last feature
+                    # Single variable: use last feature only
                     target_features = tf_target_norm[:, :, -1:]  # (batch, pred_len, 1)
                 else:
                     # Multi-variable: use last time_series_dim features
@@ -599,10 +688,9 @@ class ViTToTimeSeriesModel(nn.Module):
             else:
                 raise ValueError("tf_target must be provided in training mode")
             
-            # Get normalized predictions
             predictions_norm = self.ts_decoder(
                 encoder_output=encoder_features,
-                context_condition=context_condition,
+                context_condition=None,  # Not used in conventional approach
                 target=target_features,
                 use_teacher_forcing=True
             )
@@ -610,13 +698,15 @@ class ViTToTimeSeriesModel(nn.Module):
             # Inference: autoregressive generation
             predictions_norm = self.ts_decoder(
                 encoder_output=encoder_features,
-                context_condition=context_condition,
+                context_condition=None,  # Not used in conventional approach
                 target=None,
                 use_teacher_forcing=False
             )
         
-        # Denormalize predictions to original scale using target feature statistics
-        predictions = self.normalizer.denormalize_target(predictions_norm, target_mean, target_std)
+        # Step 5: Denormalize predictions using TARGET feature statistics only
+        # Input: predictions_norm (batch_size, pred_len, 1) - univariate predictions
+        # Output: predictions (batch_size, pred_len, 1) - in original scale of target feature
+        predictions = self.revin_layer(predictions_norm, mode='denorm', target_only=True)
         
         return predictions
     
