@@ -307,13 +307,16 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         memory = torch.cat([memory, context_vec], dim=1)  # (batch_size, num_patches+2, d_model)
         
         if use_teacher_forcing and target is not None:
-            # Teacher forcing: use ground truth as input
-            # Prepend start token to target
+            # Teacher forcing: use ground truth as input, properly aligned for prediction
+            # Input: [start_token, target[0], target[1], ..., target[n-2]]
+            # Output: [target[0], target[1], target[2], ..., target[n-1]]
+            
             start_tokens = self.start_token.expand(batch_size, 1, self.time_series_dim)
-            decoder_input = torch.cat([start_tokens, target], dim=1)  # (batch_size, pred_len+1, ts_dim)
+            # Use target[:-1] (all but last element) to predict target (all elements)
+            decoder_input = torch.cat([start_tokens, target[:, :-1, :]], dim=1)  # (batch_size, pred_len, ts_dim)
             
             # Embed and add positional encoding
-            decoder_input = self.value_embedding(decoder_input)  # (batch_size, pred_len+1, d_model)
+            decoder_input = self.value_embedding(decoder_input)  # (batch_size, pred_len, d_model)
             decoder_input = self.pos_encoding(decoder_input)
             
             # Create causal mask
@@ -325,10 +328,10 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             for layer in self.decoder_layers:
                 output = layer(output, memory, tgt_mask=tgt_mask)
             
-            # Project to output dimension and remove start token
-            output = self.output_projection(output)  # (batch_size, pred_len+1, ts_dim)
+            # Project to output dimension - now directly predicts target
+            output = self.output_projection(output)  # (batch_size, pred_len, ts_dim)
             
-            output = output[:, 1:, :]  # Remove start token: (batch_size, pred_len, ts_dim)
+            # Output directly corresponds to target without shifting
             
         else:
             # Inference mode: autoregressive generation
