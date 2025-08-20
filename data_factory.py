@@ -18,14 +18,30 @@ def data_provider(args, flag):
         shuffle_flag = True
         drop_last = True
 
-    data_set = Dataset_Custom(
-        args = args,
-        root_path=args.data_dir,
-        data_path=args.data_filename,
-        flag=flag,
-        size=[args.context_length, args.prediction_length],
-        target=args.target
-    )
+    # Handle scaler passing for TSLib standard
+    if flag == 'train':
+        data_set = Dataset_Custom(
+            args = args,
+            root_path=args.data_dir,
+            data_path=args.data_filename,
+            flag=flag,
+            size=[args.context_length, args.prediction_length],
+            target=args.target
+        )
+        # Store scaler for test dataset
+        args._scaler = data_set.scaler
+    else:
+        # Use scaler from training dataset
+        scaler = getattr(args, '_scaler', None)
+        data_set = Dataset_Custom(
+            args = args,
+            root_path=args.data_dir,
+            data_path=args.data_filename,
+            flag=flag,
+            size=[args.context_length, args.prediction_length],
+            target=args.target,
+            scaler=scaler
+        )
 
     data_loader = DataLoader(
         data_set,
