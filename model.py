@@ -627,3 +627,45 @@ def create_model(
         use_lstm_decoder=False,  # Always use Transformer
         **kwargs
     )
+
+
+def create_model_test(
+    vit_model: str = "google/vit-base-patch16-224",
+    prediction_length: Optional[int] = None,
+    context_length: int = 96,
+    test_prediction_length: Optional[int] = None,
+    use_lstm_decoder: bool = False,  # Ignored, always uses Transformer
+    **kwargs
+) -> ViTToTimeSeriesModel:
+    """
+    Factory function to create ViTToTimeSeriesModel for testing with flexible prediction length.
+    
+    Automatically determines appropriate prediction length for model architecture.
+    
+    Args:
+        vit_model: Not used, kept for compatibility
+        prediction_length: Length of predictions used during training (if None, uses reasonable default)
+        context_length: Length of context window
+        test_prediction_length: Override prediction length for testing inference
+        use_lstm_decoder: Ignored, always uses Transformer decoder
+        **kwargs: Additional model arguments
+        
+    Returns:
+        Initialized model with appropriate architecture
+    """
+    # Determine the prediction length for model architecture
+    # Priority: prediction_length > test_prediction_length > default (720)
+    if prediction_length is not None:
+        model_pred_length = prediction_length
+    elif test_prediction_length is not None:
+        model_pred_length = max(test_prediction_length, 720)  # Use at least 720 for flexibility
+    else:
+        model_pred_length = 720  # Default to 720 for maximum flexibility
+    
+    return ViTToTimeSeriesModel(
+        vit_model_name=vit_model,
+        prediction_length=model_pred_length,
+        context_length=context_length,
+        use_lstm_decoder=False,  # Always use Transformer
+        **kwargs
+    )
