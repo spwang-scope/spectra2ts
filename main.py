@@ -104,7 +104,7 @@ def parse_arguments():
     # Experiment arguments
     parser.add_argument("--experiment_name", type=str, default="vit_timeseries",
                        help="Name of the experiment")
-    parser.add_argument("--output_dir", type=str, default=f"./outputs_{timestamp}_{args.data_filename}",
+    parser.add_argument("--output_dir", type=str, default=f"./outputs_{timestamp}",
                        help="Output directory for models and logs")
     parser.add_argument("--save_interval", type=int, default=50,
                        help="Save model every N epochs")
@@ -140,6 +140,7 @@ def parse_arguments():
                        help="Use tensorboard logging")
     
     args = parser.parse_args()
+    args.target = 'OT'
     
     def get_df_channel():
         df = pd.read_csv(os.path.join(args.data_dir,
@@ -396,7 +397,6 @@ def test(args, peeking=False, model=None, epoch=None):
     if not peeking:
         logger.info("Creating model for testing...")
         model = create_model(
-            vit_model=args.vit_model,
             image_size=args.image_size,
             num_channels=args.num_channels,
             prediction_length=args.prediction_length,
@@ -408,7 +408,6 @@ def test(args, peeking=False, model=None, epoch=None):
             ts_num_layers=args.ts_num_layers,
             ts_dim_feedforward=args.ts_dim_feedforward,
             ts_dropout=args.ts_dropout,
-            use_lstm_decoder=False,
         ).to(device)
         logger.info("Model created successfully") 
         load_checkpoint(args.checkpoint_path, model, logger=logger)
@@ -445,11 +444,16 @@ def test(args, peeking=False, model=None, epoch=None):
             preds.append(pred)
             trues.append(true)
 
-            if (i % 20 == 0 and (epoch + 1) % 10 == 0 and peeking):
-                input = batch_x.detach().cpu().numpy()
-                gt = np.concatenate((input[0, :args.context_length, -1], true[0, :, -1]), axis=0)
-                pd = np.concatenate((input[0, :args.context_length, -1], pred[0, :, -1]), axis=0)
-                visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch}.png'))
+
+            input = batch_x.detach().cpu().numpy()
+            gt = np.concatenate((input[0, :args.context_length, -1], true[0, :, -1]), axis=0)
+            pd = np.concatenate((input[0, :args.context_length, -1], pred[0, :, -1]), axis=0)
+            if peeking:
+                if (i % 20 == 0 and (epoch + 1) % 10 == 0):
+                    visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch}.png'))
+            else:
+                if (i % 10 == 0):
+                    visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}.png'))
 
             total_loss.append(loss.item())
             
@@ -471,6 +475,8 @@ def test(args, peeking=False, model=None, epoch=None):
     print(f"Pred range: {preds.min():.6f} to {preds.max():.6f}")
     print(f"True range: {trues.min():.6f} to {trues.max():.6f}")
 
+    
+
     # Calculate metrics
     mae, mse, _, _, _ = metric(preds, trues)
     logger.info(f'MSE: {mse:.7f}, MAE: {mae:.7f}')
@@ -478,7 +484,7 @@ def test(args, peeking=False, model=None, epoch=None):
     if peeking:
         model.train()  # Return to training mode
         return avg_loss
-    
+
     # Save results
     os.makedirs(args.output_dir, exist_ok=True)
     with open(os.path.join(args.output_dir, "test_results.txt"), 'w') as f:
