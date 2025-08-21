@@ -9,7 +9,7 @@ Put dataset/ under pwd
 
 #
 
-Command sample
+Command example
 
 Training:
 
