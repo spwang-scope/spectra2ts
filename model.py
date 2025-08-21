@@ -19,7 +19,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vit_encoder import RectangularViT, create_rectangular_vit
 from pytorch_stft import get_STFT_spectra  # Importing the STFT function from pytorch_stft.py
-from bridge import CorrelationAlignment
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -371,13 +370,12 @@ class ViTToTimeSeriesModel(nn.Module):
     """
     Architecture combining rectangular ViT encoder with Transformer decoder.
     
-    Uses CORAL for domain bridging and proper cross-attention mechanism.
+    Uses linear projection for feature adaptation and cross-attention mechanism.
     Supports teacher forcing during training and autoregressive generation during inference.
     """
     
     def __init__(
         self,
-        vit_model_name: str = "google/vit-base-patch16-224",  # Kept for compatibility
         image_size: int = 64,  # Height is always 64
         num_channels: int = 3,
         prediction_length: int = 96,
@@ -391,18 +389,16 @@ class ViTToTimeSeriesModel(nn.Module):
         ts_dropout: float = 0.1,
         image_mean: list = [0.485, 0.456, 0.406],
         image_std: list = [0.229, 0.224, 0.225],
-        use_lstm_decoder: bool = False,  # Kept for compatibility but not used
     ):
         """
         Initialize the model.
         
         Args:
-            vit_model_name: Not used, kept for compatibility
             image_size: Height of spectrogram (always 64)
             num_channels: Number of channels in spectrogram
             prediction_length: Length of time series to predict
             context_length: Length of context window
-            feature_projection_dim: Dimension for CORAL projection
+            feature_projection_dim: Dimension for feature projection
             time_series_dim: Dimension of time series (usually 1 for univariate)
             ts_model_dim: Hidden dimension for transformer decoder
             ts_num_heads: Number of attention heads
@@ -411,7 +407,6 @@ class ViTToTimeSeriesModel(nn.Module):
             ts_dropout: Dropout rate
             image_mean: Mean values for image normalization
             image_std: Std values for image normalization
-            use_lstm_decoder: Not used, always uses Transformer decoder
         """
         super().__init__()
         
@@ -439,15 +434,8 @@ class ViTToTimeSeriesModel(nn.Module):
             dropout=0.1
         )
         
-        # CORAL Domain Bridge (kept for compatibility but not used)
+        # Linear projection for encoder features
         vit_hidden_size = 768  # Default ViT hidden size
-        #self.domain_bridge = CorrelationAlignment(
-        #    input_dim=vit_hidden_size,
-        #    output_dim=feature_projection_dim,
-        #    use_bias=False
-        #)
-        
-        # Linear projection to replace CORAL bridge
         self.encoder_projection = nn.Linear(vit_hidden_size, feature_projection_dim)
         
         
@@ -570,29 +558,23 @@ class ViTToTimeSeriesModel(nn.Module):
 
 
 def create_model(
-    vit_model: str = "google/vit-base-patch16-224",
     prediction_length: int = 96,
     context_length: int = 96,
-    use_lstm_decoder: bool = False,  # Ignored, always uses Transformer
     **kwargs
 ) -> ViTToTimeSeriesModel:
     """
     Factory function to create ViTToTimeSeriesModel with common configurations.
     
     Args:
-        vit_model: Not used, kept for compatibility
         prediction_length: Length of predictions
         context_length: Length of context window
-        use_lstm_decoder: Ignored, always uses Transformer decoder
         **kwargs: Additional model arguments
         
     Returns:
         Initialized model
     """
     return ViTToTimeSeriesModel(
-        vit_model_name=vit_model,
         prediction_length=prediction_length,
         context_length=context_length,
-        use_lstm_decoder=False,  # Always use Transformer
         **kwargs
     )

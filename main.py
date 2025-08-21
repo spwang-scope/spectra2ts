@@ -18,7 +18,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import pandas as pd
 from data_factory import data_provider
@@ -26,7 +25,6 @@ from metrics import metric
 from util import visual
 
 from model import ViTToTimeSeriesModel, create_model
-from bridge import CorrelationAlignment
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +51,6 @@ def parse_arguments():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Model arguments
-    parser.add_argument("--vit_model", type=str, default="google/vit-base-patch16-224",
-                       help="ViT model name (not used, kept for compatibility)")
     parser.add_argument("--prediction_length", type=int, default=96,
                        help="Length of time series to predict")
     parser.add_argument("--context_length", type=int, default=96,
@@ -73,10 +69,6 @@ def parse_arguments():
                        help="Feed-forward dimension")
     parser.add_argument("--ts_dropout", type=float, default=0.1,
                        help="Dropout rate for transformer")
-    parser.add_argument('--target', type=str, default='OT',
-                       help='target feature in S or MS task')
-    parser.add_argument("--lstm", action="store_true",
-                       help="Not used, always uses Transformer decoder")
     
     # Training arguments
     parser.add_argument("--batch_size", type=int, default=8,
@@ -112,7 +104,7 @@ def parse_arguments():
     # Experiment arguments
     parser.add_argument("--experiment_name", type=str, default="vit_timeseries",
                        help="Name of the experiment")
-    parser.add_argument("--output_dir", type=str, default=f"./outputs_{timestamp}",
+    parser.add_argument("--output_dir", type=str, default=f"./outputs_{timestamp}_{args.data_filename}",
                        help="Output directory for models and logs")
     parser.add_argument("--save_interval", type=int, default=50,
                        help="Save model every N epochs")
@@ -268,6 +260,9 @@ def train(args):
         use_lstm_decoder=False,  # Always use Transformer
     ).to(device)
     logger.info("Model created successfully")
+
+    logger.info(f"Model architecture: {model}")
+    logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
     # Apply freezing if requested
     if args.freeze_vit:
