@@ -27,14 +27,12 @@ import matplotlib.pyplot as plt
 
 
 class PositionalEncoding(nn.Module):
-    """Positional encoding for transformer with dynamic length support."""
+    """Positional encoding for transformer."""
     
     def __init__(self, d_model: int, max_len: int = 1000, dropout: float = 0.1):
         super().__init__()
-        self.d_model = d_model
         self.dropout = nn.Dropout(p=dropout)
         
-        # Create initial positional encoding buffer
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * 
@@ -46,34 +44,12 @@ class PositionalEncoding(nn.Module):
         
         self.register_buffer('pe', pe)
     
-    def _extend_pe(self, seq_len: int):
-        """Extend positional encoding buffer if needed."""
-        if seq_len > self.pe.size(1):
-            # Create extended positional encoding
-            new_max_len = max(seq_len, self.pe.size(1) * 2)  # Double for efficiency
-            pe = torch.zeros(new_max_len, self.d_model, device=self.pe.device)
-            position = torch.arange(0, new_max_len, dtype=torch.float, device=self.pe.device).unsqueeze(1)
-            div_term = torch.exp(torch.arange(0, self.d_model, 2, dtype=torch.float, device=self.pe.device) * 
-                               (-math.log(10000.0) / self.d_model))
-            
-            pe[:, 0::2] = torch.sin(position * div_term)
-            pe[:, 1::2] = torch.cos(position * div_term)
-            pe = pe.unsqueeze(0)  # Shape: (1, new_max_len, d_model)
-            
-            # Update the buffer
-            self.register_buffer('pe', pe)
-    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: Tensor of shape (batch_size, seq_length, d_model)
         """
-        seq_len = x.size(1)
-        
-        # Extend positional encoding if needed
-        self._extend_pe(seq_len)
-        
-        x = x + self.pe[:, :seq_len, :]
+        x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
 
 
@@ -179,8 +155,8 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         # Embedding for time series values
         self.value_embedding = nn.Linear(time_series_dim, d_model)
         
-        # Positional encoding with larger initial buffer to handle dynamic lengths
-        self.pos_encoding = PositionalEncoding(d_model, max_len=max(prediction_length + 1, 1000), dropout=dropout)
+        # Positional encoding
+        self.pos_encoding = PositionalEncoding(d_model, max_len=prediction_length + 1, dropout=dropout)
         
         # Project encoder output to decoder dimension for cross-attention
         self.encoder_projection = nn.Linear(encoder_dim, d_model)
@@ -303,8 +279,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         encoder_output: torch.Tensor,
         context_condition: torch.Tensor,
         target: Optional[torch.Tensor] = None,
-        use_teacher_forcing: bool = True,
-        prediction_length: Optional[int] = None
+        use_teacher_forcing: bool = True
     ) -> torch.Tensor:
         """
         Forward pass with optional teacher forcing.
@@ -314,7 +289,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             context_condition: Last feature column of context (batch_size, context_length)
             target: Ground truth for teacher forcing (batch_size, prediction_length, time_series_dim)
             use_teacher_forcing: Whether to use teacher forcing (True during training)
-            prediction_length: Override prediction length for inference (if None, uses self.prediction_length)
             
         Returns:
             Predictions (batch_size, prediction_length, time_series_dim)
@@ -361,14 +335,12 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             
         else:
             # Inference mode: autoregressive generation
-            # Use dynamic prediction length if provided, otherwise use default
-            pred_len = prediction_length if prediction_length is not None else self.prediction_length
             predictions = []
             
             # Start with start token
             current_input = self.start_token.expand(batch_size, 1, self.time_series_dim)
             
-            for step in range(pred_len):
+            for step in range(self.prediction_length):
                 # Embed current sequence
                 embedded = self.value_embedding(current_input)  # (batch_size, step+1, d_model)
                 embedded = self.pos_encoding(embedded)
@@ -510,7 +482,7 @@ class ViTToTimeSeriesModel(nn.Module):
         # Skip CORAL domain bridge - return ViT features directly
         return vit_features
     
-    def forward(self, context: torch.Tensor, tf_target: torch.Tensor = None, mode: str = 'train', prediction_length: Optional[int] = None) -> torch.Tensor:
+    def forward(self, context: torch.Tensor, tf_target: torch.Tensor = None, mode: str = 'train') -> torch.Tensor:
         """
         Forward pass with TSLib standard preprocessing (normalized input from data loader).
         
@@ -518,7 +490,6 @@ class ViTToTimeSeriesModel(nn.Module):
             context: Input context time series (batch_size, context_length, num_features) - already StandardScaler normalized
             tf_target: Target time series for teacher forcing (batch_size, prediction_length, num_features) - already normalized
             mode: 'train' for teacher forcing, 'inference' for autoregressive generation
-            prediction_length: Override prediction length for inference (if None, uses model default)
             
         Returns:
             Predicted time series (batch_size, prediction_length, 1) - normalized scale (TSLib standard)
@@ -569,25 +540,23 @@ class ViTToTimeSeriesModel(nn.Module):
                 encoder_output=encoder_features,
                 context_condition=context_condition,  # Pass context condition for cross-attention
                 target=None,
-                use_teacher_forcing=False,
-                prediction_length=prediction_length
+                use_teacher_forcing=False
             )
         
         # Return normalized predictions (TSLib standard for loss computation)
         return predictions
     
-    def inference(self, context: torch.Tensor, prediction_length: Optional[int] = None) -> torch.Tensor:
+    def inference(self, context: torch.Tensor) -> torch.Tensor:
         """
         Inference mode without teacher forcing.
         
         Args:
             context: Input context time series (batch_size, context_length, features)
-            prediction_length: Override prediction length (if None, uses model default)
             
         Returns:
             Predicted time series (batch_size, prediction_length, time_series_dim)
         """
-        return self.forward(context=context, tf_target=None, mode='inference', prediction_length=prediction_length)
+        return self.forward(context=context, tf_target=None, mode='inference')
     
     def freeze_vit_encoder(self, freeze: bool = True):
         """Freeze or unfreeze the ViT encoder parameters."""

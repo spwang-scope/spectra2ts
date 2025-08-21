@@ -57,8 +57,6 @@ def parse_arguments():
                        help="ViT model name (not used, kept for compatibility)")
     parser.add_argument("--prediction_length", type=int, default=96,
                        help="Length of time series to predict")
-    parser.add_argument("--test_prediction_length", type=int, default=None,
-                       help="Override prediction length for testing (if None, uses prediction_length)")
     parser.add_argument("--context_length", type=int, default=96,
                        help="Length of context window")
     parser.add_argument("--feature_projection_dim", type=int, default=128,
@@ -388,17 +386,8 @@ def train(args):
     logger.info("Training completed!")
 
 
-def test(args, peeking=False, model=None, epoch=0, test_prediction_length=None):
-    """
-    Test the model using inference mode (no teacher forcing).
-    
-    Args:
-        args: Command line arguments
-        peeking: Whether this is called during training for validation
-        model: Pre-loaded model (if peeking=True)
-        epoch: Current epoch (if peeking=True)
-        test_prediction_length: Override prediction length for testing (if None, uses args.prediction_length)
-    """
+def test(args, peeking=False, model=None, epoch=None):
+    """Test the model using inference mode (no teacher forcing)."""
     
     device = get_device(args.device, args.cuda_num)
     
@@ -444,14 +433,13 @@ def test(args, peeking=False, model=None, epoch=0, test_prediction_length=None):
             batch_x = batch_x.float().to(device)
             batch_y = batch_y.float().to(device)
 
-            # Use inference mode (no teacher forcing) with dynamic prediction length
-            pred_len = test_prediction_length if test_prediction_length is not None else args.prediction_length
-            outputs = model.inference(batch_x[:, :args.context_length, :], prediction_length=pred_len)
+            # Use inference mode (no teacher forcing)
+            outputs = model.inference(batch_x[:, :args.context_length, :])
 
             # Calculate loss
             f_dim = -1
             outputs = outputs[:, :, :].to(device)
-            batch_y = batch_y[:, -pred_len:, f_dim:].to(device)
+            batch_y = batch_y[:, -args.prediction_length:, f_dim:].to(device)
             
             loss = criterion(outputs, batch_y)
             
@@ -620,7 +608,7 @@ def main():
     if args.mode == "train":
         train(args)
     elif args.mode == "test":
-        test(args, test_prediction_length=args.test_prediction_length)
+        test(args)
     elif args.mode == "inference":
         inference(args)
     else:
