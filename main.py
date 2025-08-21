@@ -25,7 +25,7 @@ from data_factory import data_provider
 from metrics import metric
 from util import visual
 
-from model import ViTToTimeSeriesModel, create_model, create_model_test
+from model import ViTToTimeSeriesModel, create_model
 from bridge import CorrelationAlignment
 
 logger = logging.getLogger(__name__)
@@ -56,9 +56,9 @@ def parse_arguments():
     parser.add_argument("--vit_model", type=str, default="google/vit-base-patch16-224",
                        help="ViT model name (not used, kept for compatibility)")
     parser.add_argument("--prediction_length", type=int, default=96,
-                       help="Length of time series to predict (required for training, optional for testing)")
+                       help="Length of time series to predict")
     parser.add_argument("--test_prediction_length", type=int, default=None,
-                       help="Prediction length for testing inference (if None, uses prediction_length or model default)")
+                       help="Override prediction length for testing (if None, uses prediction_length)")
     parser.add_argument("--context_length", type=int, default=96,
                        help="Length of context window")
     parser.add_argument("--feature_projection_dim", type=int, default=128,
@@ -411,13 +411,12 @@ def test(args, peeking=False, model=None, epoch=0, test_prediction_length=None):
     # Create and load model
     if not peeking:
         logger.info("Creating model for testing...")
-        model = create_model_test(
+        model = create_model(
             vit_model=args.vit_model,
             image_size=args.image_size,
             num_channels=args.num_channels,
             prediction_length=args.prediction_length,
             context_length=args.context_length,
-            test_prediction_length=test_prediction_length,
             feature_projection_dim=args.feature_projection_dim,
             time_series_dim=args.time_series_dim,
             ts_model_dim=args.ts_model_dim,
@@ -430,7 +429,6 @@ def test(args, peeking=False, model=None, epoch=0, test_prediction_length=None):
         logger.info("Model created successfully") 
         load_checkpoint(args.checkpoint_path, model, logger=logger)
         logger.info("Model weights loaded successfully") 
-        logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     else:
         assert(model is not None)
 
