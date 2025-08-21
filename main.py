@@ -1,7 +1,7 @@
 """
 Main Training and Testing Script for ViT-to-TimeSeries Model
 
-Handles training, evaluation, and inference with configurable arguments.
+Handles training with teacher forcing, evaluation, and inference with autoregressive generation.
 """
 
 import argparse
@@ -18,23 +18,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import pandas as pd
 from data_factory import data_provider
 from metrics import metric
 from util import visual
 
-# Check transformers version compatibility
-try:
-    import transformers
-    transformers_version = transformers.__version__
-    print(f"Using transformers version: {transformers_version}")
-except ImportError:
-    raise ImportError("transformers library is required. Install with: pip install transformers")
-
 from model import ViTToTimeSeriesModel, create_model
-from bridge import CorrelationAlignment
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +51,11 @@ def parse_arguments():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Model arguments
-    parser.add_argument("--vit_model", type=str, default="google/vit-base-patch16-224",
-                       help="ViT model name from HuggingFace")
-    parser.add_argument("--prediction_length", type=int, default=24,
+    parser.add_argument("--prediction_length", type=int, default=96,
                        help="Length of time series to predict")
-    parser.add_argument("--context_length", type=int, default=48,
-                       help="Not used but kept for compatibility")
-    parser.add_argument("--feature_projection_dim", type=int, default=256,
+    parser.add_argument("--context_length", type=int, default=96,
+                       help="Length of context window")
+    parser.add_argument("--feature_projection_dim", type=int, default=128,
                        help="Dimension for CORAL feature projection")
     parser.add_argument("--time_series_dim", type=int, default=1,
                        help="Dimension of time series (1 for univariate)")
@@ -75,16 +63,12 @@ def parse_arguments():
                        help="Hidden dimension for transformer decoder")
     parser.add_argument("--ts_num_heads", type=int, default=8,
                        help="Number of attention heads")
-    parser.add_argument("--ts_num_layers", type=int, default=4,
+    parser.add_argument("--ts_num_layers", type=int, default=3,
                        help="Number of decoder layers")
     parser.add_argument("--ts_dim_feedforward", type=int, default=1024,
                        help="Feed-forward dimension")
     parser.add_argument("--ts_dropout", type=float, default=0.1,
                        help="Dropout rate for transformer")
-    parser.add_argument('--target', type=str, default='OT',
-                       help='target feature in S or MS task')
-    parser.add_argument("--lstm", action="store_true",
-                       help="Use LSTM decoder instead of Transformer decoder")
     
     # Training arguments
     parser.add_argument("--batch_size", type=int, default=8,
@@ -107,7 +91,7 @@ def parse_arguments():
     parser.add_argument("--data_filename", type=str, default="ETTh1.csv",
                        help="Directory containing dataset")
     parser.add_argument("--image_size", type=int, default=64,
-                       help="Size of spectrogram")
+                       help="Height of spectrogram (always 64)")
     parser.add_argument("--num_workers", type=int, default=4,
                        help="Number of data loading workers")
     parser.add_argument("--augment", action="store_true",
@@ -120,7 +104,7 @@ def parse_arguments():
     # Experiment arguments
     parser.add_argument("--experiment_name", type=str, default="vit_timeseries",
                        help="Name of the experiment")
-    parser.add_argument("--output_dir", type=str, default=f"./outputs_{timestamp}",
+    parser.add_argument("--output_dir", type=str, default=f"./outputs_{timestamp}_{args.data_filename}",
                        help="Output directory for models and logs")
     parser.add_argument("--save_interval", type=int, default=50,
                        help="Save model every N epochs")
@@ -150,7 +134,7 @@ def parse_arguments():
 
     # Logging arguments
     parser.add_argument("--log_level", type=str, default="INFO",
-                       choices=["pred", "INFO", "WARNING", "ERROR"],
+                       choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                        help="Logging level")
     parser.add_argument("--tensorboard", action="store_true",
                        help="Use tensorboard logging")
@@ -180,8 +164,8 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
     """Create optimizer and learning rate scheduler."""
     # Different learning rates for different components
     param_groups = [
-        {"params": model.vit_encoder.parameters(), "lr": args.learning_rate * 0.1},
-        {"params": model.domain_bridge.parameters(), "lr": args.learning_rate},
+        {"params": model.vit_encoder.parameters(), "lr": args.learning_rate},
+        # {"params": model.domain_bridge.parameters(), "lr": args.learning_rate},
         {"params": model.ts_decoder.parameters(), "lr": args.learning_rate},
     ]
     
@@ -204,6 +188,7 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
         scheduler = None
     
     return optimizer, scheduler
+
 
 def save_checkpoint(model: ViTToTimeSeriesModel, optimizer: optim.Optimizer, epoch: int, 
                    metrics: Dict[str, float], filepath: str, logger):
@@ -245,7 +230,7 @@ def load_checkpoint(filepath: str, model: ViTToTimeSeriesModel,
 
 
 def train(args):
-    """Main training function."""
+    """Main training function with teacher forcing."""
     
     # Setup
     device = get_device(args.device, args.cuda_num)
@@ -258,7 +243,7 @@ def train(args):
     logger.info(f"Created data loaders: {len(train_loader)} trains {len(test_loader)} tests")
     
     # Create model
-    logger.info("Creating ViT-to-TimeSeries model...")
+    logger.info("Creating ViT-to-TimeSeries model with Transformer decoder...")
     model = create_model(
         vit_model=args.vit_model,
         image_size=args.image_size,
@@ -272,10 +257,12 @@ def train(args):
         ts_num_layers=args.ts_num_layers,
         ts_dim_feedforward=args.ts_dim_feedforward,
         ts_dropout=args.ts_dropout,
-        use_lstm_decoder=args.lstm,
+        use_lstm_decoder=False,  # Always use Transformer
     ).to(device)
     logger.info("Model created successfully")
-    
+
+    logger.info(f"Model architecture: {model}")
+    logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
     # Apply freezing if requested
     if args.freeze_vit:
@@ -290,8 +277,8 @@ def train(args):
     
     # Create optimizer and scheduler
     logger.info("Creating optimizer and scheduler...")
-    optimizer, _ = create_optimizer_and_scheduler(model, args)
-    criterion = nn.MSELoss()
+    optimizer, scheduler = create_optimizer_and_scheduler(model, args)
+    criterion = nn.HuberLoss(delta=0.1)  
     
     # Setup tensorboard
     writer = None
@@ -308,7 +295,7 @@ def train(args):
     
     logger.info(f"Starting training from epoch {start_epoch}")
     logger.info(f"Device: {device}")
-    logger.info(f"Using custom Transformer decoder with transformers v{transformers_version}")
+    logger.info("Using custom Transformer decoder with cross-attention and teacher forcing")
     
     for epoch in range(start_epoch, args.num_epochs):
         logger.info(f"Starting epoch {epoch}/{args.num_epochs}")
@@ -318,45 +305,75 @@ def train(args):
 
         model.train()
         epoch_time = time.time()
+        
         for i, (batch_x, batch_y) in enumerate(train_loader):
             iter_count += 1
             optimizer.zero_grad()
             batch_x = batch_x.float().to(device)
             batch_y = batch_y.float().to(device)
 
-            outputs = model(batch_x)
+            # Forward pass with teacher forcing (training mode)
+            outputs = model(context=batch_x, tf_target=batch_y, mode='train')
 
-            f_dim = -1 # always select last feature (OT) for calculating loss?
-            outputs = outputs[:, -args.prediction_length:, f_dim:].to(device)
-            batch_y = batch_y[:, -args.prediction_length:, f_dim:].to(device)
+            # Select target feature for loss calculation based on time_series_dim
+            outputs = outputs[:, :, :].to(device)
+            if hasattr(args, 'time_series_dim') and args.time_series_dim > 1:
+                # Multi-variable prediction: use last time_series_dim features
+                batch_y = batch_y[:, :args.prediction_length, -args.time_series_dim:].to(device)
+            else:
+                # Single variable prediction: use last feature only
+                batch_y = batch_y[:, :args.prediction_length, -1:].to(device)
+            
+            # Check for empty tensors
+            if outputs.numel() == 0:
+                logger.error(f"Empty outputs tensor! Shape: {outputs.shape}")
+                continue
+            
             loss = criterion(outputs, batch_y)
             train_loss.append(loss.item())
 
             if (i + 1) % 100 == 0:
-                logger.info("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
+                logger.info(f"\titers: {i + 1}, epoch: {epoch + 1} | loss: {loss.item():.7f}")
                 iter_count = 0
 
             loss.backward()
-            if epoch < args.num_epochs*0.05: # Warmup phase
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
+            
+            # Gradient clipping during warmup
+            if epoch < args.warmup_epochs:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
 
-        logger.info("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
+        logger.info(f"Epoch: {epoch + 1} cost time: {time.time() - epoch_time:.2f}s")
         train_loss = np.average(train_loss)
-        test_loss = test(args, peeking=True, model=model)    # Peek testing result
-
-        logger.info("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Test Loss: {3:.7f}".format(
-            epoch + 1, -1, train_loss, test_loss))
         
-        if epoch % args.save_interval == 0:
-            logger.info(f"Saving checkpoint for epoch {epoch}...")
-            checkpoint_path = os.path.join(experiment_dir, f'checkpoint_epoch_{epoch}.pt')
-            save_checkpoint(model, optimizer, epoch, {}, checkpoint_path, logger)
+        # Evaluate on test set
+        test_loss = test(args, peeking=True, model=model, epoch=epoch)
+        
+        logger.info(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.7f} Test Loss: {test_loss:.7f}")
+        
+        # Learning rate scheduling
+        if scheduler:
+            scheduler.step()
+        
+        # Save checkpoint
+        if (epoch + 1) % args.save_interval == 0:
+            logger.info(f"Saving checkpoint for epoch {epoch + 1}...")
+            checkpoint_path = os.path.join(experiment_dir, f'checkpoint_epoch_{epoch + 1}.pt')
+            save_checkpoint(model, optimizer, epoch + 1, 
+                          {'train_loss': train_loss, 'test_loss': test_loss}, 
+                          checkpoint_path, logger)
+        
+        # TensorBoard logging
+        if writer:
+            writer.add_scalar('Loss/train', train_loss, epoch)
+            writer.add_scalar('Loss/test', test_loss, epoch)
+            writer.add_scalar('LR', optimizer.param_groups[0]['lr'], epoch)
     
     # Final save
     logger.info("Saving final model...")
     final_path = os.path.join(experiment_dir, 'final_model.pt')
-    save_checkpoint(model, optimizer, args.num_epochs - 1, {}, final_path, logger)
+    save_checkpoint(model, optimizer, args.num_epochs, {}, final_path, logger)
     
     if writer:
         writer.close()
@@ -364,8 +381,8 @@ def train(args):
     logger.info("Training completed!")
 
 
-def test(args, peeking=False, model=None):
-    """Test the model."""
+def test(args, peeking=False, model=None, epoch=None):
+    """Test the model using inference mode (no teacher forcing)."""
     
     device = get_device(args.device, args.cuda_num)
     
@@ -391,20 +408,19 @@ def test(args, peeking=False, model=None):
             ts_num_layers=args.ts_num_layers,
             ts_dim_feedforward=args.ts_dim_feedforward,
             ts_dropout=args.ts_dropout,
-            use_lstm_decoder=args.lstm,
+            use_lstm_decoder=False,
         ).to(device)
         logger.info("Model created successfully") 
         load_checkpoint(args.checkpoint_path, model, logger=logger)
         logger.info("Model weights loaded successfully") 
-    else:   # peeking
+    else:
         assert(model is not None)
 
     preds = []
     trues = []
-
     criterion = nn.MSELoss()
-    
     total_loss = []
+    
     model.eval()  # Set to evaluation mode
     
     with torch.no_grad():
@@ -412,32 +428,32 @@ def test(args, peeking=False, model=None):
             batch_x = batch_x.float().to(device)
             batch_y = batch_y.float().to(device)
 
-            outputs = model(batch_x)
+            # Use inference mode (no teacher forcing)
+            outputs = model.inference(batch_x[:, :args.context_length, :])
 
-            f_dim = -1 # always select last feature (OT) for calculating loss?
-            outputs = outputs[:, -args.prediction_length:, f_dim:].to(device)
+            # Calculate loss
+            f_dim = -1
+            outputs = outputs[:, :, :].to(device)
             batch_y = batch_y[:, -args.prediction_length:, f_dim:].to(device)
+            
             loss = criterion(outputs, batch_y)
             
-            # FIXED: Move both tensors to CPU for loss calculation (following original implementation)
+            # Store predictions and ground truth
             pred = outputs.detach().cpu()
             true = batch_y.detach().cpu()
-
-            # Store predictions and ground truth
+            
             preds.append(pred)
             trues.append(true)
-            if i % 20 == 0:
+
+            if (i % 20 == 0 and (epoch + 1) % 10 == 0 and peeking):
                 input = batch_x.detach().cpu().numpy()
-                gt = np.concatenate((input[0, :, -1], true[0, :, -1]), axis=0)
-                pd = np.concatenate((input[0, :, -1], pred[0, :, -1]), axis=0)
-                visual(gt, pd, os.path.join(args.output_dir, str(i) + '.png'))
-            
+                gt = np.concatenate((input[0, :args.context_length, -1], true[0, :, -1]), axis=0)
+                pd = np.concatenate((input[0, :args.context_length, -1], pred[0, :, -1]), axis=0)
+                visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch}.png'))
+
             total_loss.append(loss.item())
             
     avg_loss = np.average(total_loss)
-
-    if peeking:
-        model.train()  # Return to training mode if peeking
 
     # Concatenate all predictions and ground truth
     preds = np.concatenate(preds, axis=0)
@@ -456,27 +472,27 @@ def test(args, peeking=False, model=None):
     print(f"True range: {trues.min():.6f} to {trues.max():.6f}")
 
     # Calculate metrics
-    mae, mse, rmse, mape, mspe = metric(preds, trues)
-    print('mse:{}, mae:{}'.format(mse, mae))
+    mae, mse, _, _, _ = metric(preds, trues)
+    logger.info(f'MSE: {mse:.7f}, MAE: {mae:.7f}')
+    
+    if peeking:
+        model.train()  # Return to training mode
+        return avg_loss
     
     # Save results
-    f = open(os.path.join(args.output_dir, "result.txt"), 'a')
-    f.write('MSE: {:.7f}, MAE: {:.7f}, RMSE: {:.7f}, MAPE: {:.7f}, MSPE: {:.7f}\n'.format(
-        mse, mae, rmse, mape, mspe))
-    f.write('\n')
-    f.write('\n')
-    f.close()
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(os.path.join(args.output_dir, "test_results.txt"), 'w') as f:
+        f.write(f'MSE: {mse:.7f}, MAE: {mae:.7f}\n')
 
-    np.save(os.path.join(args.output_dir, 'metrics.npy'), np.array([mae, mse, rmse, mape, mspe]))
-    np.save(os.path.join(args.output_dir, 'pred.npy'), preds)
-    np.save(os.path.join(args.output_dir, 'true.npy'), trues)
+    np.save(os.path.join(args.output_dir, 'test_metrics.npy'), np.array([mae, mse]))
+    np.save(os.path.join(args.output_dir, 'test_pred.npy'), preds)
+    np.save(os.path.join(args.output_dir, 'test_true.npy'), trues)
 
     return avg_loss
 
 
 def inference(args):
-    
-    """Run inference on new data."""
+    """Run inference on new data using autoregressive generation."""
     
     device = get_device(args.device, args.cuda_num)
     
@@ -498,9 +514,9 @@ def inference(args):
         ts_num_layers=args.ts_num_layers,
         ts_dim_feedforward=args.ts_dim_feedforward,
         ts_dropout=args.ts_dropout,
-        use_lstm_decoder=args.lstm,
+        use_lstm_decoder=False,
     ).to(device)
-    logger.info("Model created successfully")
+    logger.info("Model created successfully with Transformer decoder")
     
     # Load checkpoint if provided
     if args.checkpoint_path and not args.no_checkpoint:
@@ -513,7 +529,7 @@ def inference(args):
     else:
         logger.info("Using randomly initialized model (trial run)")
 
-
+    # Load data
     data_set, data_loader = data_provider(args, flag='test')
     
     model.eval()
@@ -522,21 +538,22 @@ def inference(args):
     inference_dir = os.path.join(args.output_dir, "inference_results")
     os.makedirs(inference_dir, exist_ok=True)
     
-    # Run inference on images
+    # Run inference
     predictions = []
-    image_names = []
-    failed_images = []
+    contexts = []
     
-    logger.info("Starting inference...")
+    logger.info("Starting inference with autoregressive generation...")
     
     with torch.no_grad():
         for i, (batch_x, batch_y) in enumerate(data_loader):
-            batch_x = batch_x.float()
-            batch_y = batch_y.float()
+            batch_x = batch_x.float().to(device)
             
-            # Generate predictions
+            # Use only context for inference
+            context = batch_x[:, :args.context_length, :]
+            
+            # Generate predictions using inference mode
             logger.debug(f"Generating predictions for batch {i}...")
-            pred = model(batch_x)
+            pred = model.inference(context)
             logger.debug(f"Generated predictions shape: {pred.shape}")
             
             # Validate predictions
@@ -545,38 +562,43 @@ def inference(args):
                 pred = torch.zeros_like(pred)
             
             predictions.append(pred.cpu().numpy())
+            contexts.append(context.cpu().numpy())
             
-            logger.info(f"Successfully processed batch {i}: {len(batch_x)} images")
+            logger.info(f"Successfully processed batch {i}: {len(batch_x)} samples")
             
-            break  # Only one batch per dataloader
+            if i >= 10:  # Process first 10 batches for demo
+                break
     
     logger.info(f"Inference complete")
     
-    # Concatenate all predictions
+    # Save results
     if predictions:
-        logger.info("Concatenating all predictions...")
+        logger.info("Saving predictions...")
         all_predictions = np.concatenate(predictions, axis=0)
+        all_contexts = np.concatenate(contexts, axis=0)
         
-        # Save predictions
-        try:
-            logger.info("Saving predictions...")
-            np.save(os.path.join(inference_dir, "predictions.npy"), all_predictions)
-        except Exception as e:
-            logger.error(f"Failed to save inference results: {str(e)}")
-            
+        np.save(os.path.join(inference_dir, "predictions.npy"), all_predictions)
+        np.save(os.path.join(inference_dir, "contexts.npy"), all_contexts)
+        
+        logger.info(f"Saved predictions shape: {all_predictions.shape}")
+        logger.info(f"Saved contexts shape: {all_contexts.shape}")
     else:
-        logger.error("No predictions generated! All batches failed.")
+        logger.error("No predictions generated!")
 
-    logger.info(f"Inference result saved")
-    
+    logger.info("Inference results saved")
+
 
 def main():
     """Main entry point."""
     args = parse_arguments()
 
     setup_logging(args)
+    logger.info("Starting experiment with Transformer decoder and cross-attention")
     logger.info("Experiment arguments: %s", vars(args))
-    torch.manual_seed(42)  # For reproducibility
+    
+    # Set random seed for reproducibility
+    torch.manual_seed(42)
+    np.random.seed(42)
     
     if args.mode == "train":
         train(args)
