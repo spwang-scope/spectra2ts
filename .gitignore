@@ -1,5 +1,4 @@
 *.npy
-gen_dummy.py
 dataset.py
 print_predictions.py
 __pycache__

@@ -96,10 +96,6 @@ def parse_arguments():
                        help="Number of data loading workers")
     parser.add_argument("--augment", action="store_true",
                        help="Apply data augmentation")
-    parser.add_argument("--use_dummy_data", action="store_true",
-                       help="Use dummy data for testing")
-    parser.add_argument("--num_dummy_samples", type=int, default=50,
-                       help="Number of dummy samples to create")
     
     # Experiment arguments
     parser.add_argument("--experiment_name", type=str, default="vit_timeseries",
@@ -448,7 +444,7 @@ def test(args, peeking=False, model=None, epoch=None):
             pd = np.concatenate((input[0, :args.context_length, -1], pred[0, :, -1]), axis=0)
             if peeking:
                 if (i % 20 == 0 and (epoch + 1) % 10 == 0):
-                    visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch}.png'))
+                    visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch + 1}.png'))
             else:
                 if (i % 10 == 0):
                     visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}.png'))
