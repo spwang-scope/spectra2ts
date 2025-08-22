@@ -246,7 +246,6 @@ def train(args):
     # Create model
     logger.info("Creating ViT-to-TimeSeries model with Transformer decoder...")
     model = create_model(
-        vit_model=args.vit_model,
         image_size=args.image_size,
         num_channels=args.num_channels,
         prediction_length=args.prediction_length,
@@ -257,8 +256,7 @@ def train(args):
         ts_num_heads=args.ts_num_heads,
         ts_num_layers=args.ts_num_layers,
         ts_dim_feedforward=args.ts_dim_feedforward,
-        ts_dropout=args.ts_dropout,
-        use_lstm_decoder=False,  # Always use Transformer
+        ts_dropout=args.ts_dropout
     ).to(device)
     logger.info("Model created successfully")
 
@@ -508,7 +506,6 @@ def inference(args):
     # Create model
     logger.info("Creating model for inference...")
     model = create_model(
-        vit_model=args.vit_model,
         image_size=args.image_size,
         num_channels=args.num_channels,
         prediction_length=args.prediction_length,
@@ -519,8 +516,7 @@ def inference(args):
         ts_num_heads=args.ts_num_heads,
         ts_num_layers=args.ts_num_layers,
         ts_dim_feedforward=args.ts_dim_feedforward,
-        ts_dropout=args.ts_dropout,
-        use_lstm_decoder=False,
+        ts_dropout=args.ts_dropout
     ).to(device)
     logger.info("Model created successfully with Transformer decoder")
     
