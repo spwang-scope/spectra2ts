@@ -100,8 +100,6 @@ def parse_arguments():
     # Experiment arguments
     parser.add_argument("--experiment_name", type=str, default="vit_timeseries",
                        help="Name of the experiment")
-    parser.add_argument("--output_dir", type=str, default=f"./outputs_{timestamp}",
-                       help="Output directory for models and logs")
     parser.add_argument("--save_interval", type=int, default=50,
                        help="Save model every N epochs")
     parser.add_argument("--eval_interval", type=int, default=5,
@@ -137,6 +135,7 @@ def parse_arguments():
     
     args = parser.parse_args()
     args.target = 'OT'
+    args.output_dir = f"./outputs_{timestamp}_{args.data_filename.split('.')[0]}_{args.mode}_{args.prediction_length}"
     
     def get_df_channel():
         df = pd.read_csv(os.path.join(args.data_dir,
