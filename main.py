@@ -188,7 +188,7 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
 
 
 def save_checkpoint(model: ViTToTimeSeriesModel, optimizer: optim.Optimizer, epoch: int, 
-                   metrics: Dict[str, float], filepath: str, logger):
+                   metrics: Dict[str, float], filepath: str, logger, scaler=None):
     """Save model checkpoint."""
     try:
         checkpoint = {
@@ -196,6 +196,7 @@ def save_checkpoint(model: ViTToTimeSeriesModel, optimizer: optim.Optimizer, epo
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'metrics': metrics,
+            'scaler': scaler,  # Save scaler for TSLib standard testing
         }
         
         torch.save(checkpoint, filepath)
@@ -205,8 +206,8 @@ def save_checkpoint(model: ViTToTimeSeriesModel, optimizer: optim.Optimizer, epo
 
 
 def load_checkpoint(filepath: str, model: ViTToTimeSeriesModel, 
-                   optimizer: Optional[optim.Optimizer] = None, logger = None) -> int:
-    """Load model checkpoint."""
+                   optimizer: Optional[optim.Optimizer] = None, logger = None) -> tuple:
+    """Load model checkpoint and return epoch and scaler."""
     try:
         checkpoint = torch.load(filepath, map_location='cpu')
         
@@ -216,10 +217,16 @@ def load_checkpoint(filepath: str, model: ViTToTimeSeriesModel,
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
         epoch = checkpoint.get('epoch', 0)
+        scaler = checkpoint.get('scaler', None)
+        
         if logger:
             logger.info(f'Checkpoint loaded: {filepath}, epoch: {epoch}')
+            if scaler is not None:
+                logger.info('Scaler loaded from checkpoint for TSLib standard testing')
+            else:
+                logger.warning('No scaler found in checkpoint - predictions may be on wrong scale!')
         
-        return epoch
+        return epoch, scaler
     except Exception as e:
         if logger:
             logger.error(f"Failed to load checkpoint from {filepath}: {str(e)}")
@@ -286,7 +293,7 @@ def train(args):
     
     if args.checkpoint_path:
         logger.info(f"Loading checkpoint from {args.checkpoint_path}...")
-        start_epoch = load_checkpoint(args.checkpoint_path, model, optimizer, logger)
+        start_epoch, _ = load_checkpoint(args.checkpoint_path, model, optimizer, logger)
     
     logger.info(f"Starting training from epoch {start_epoch}")
     logger.info(f"Device: {device}")
@@ -357,7 +364,7 @@ def train(args):
             checkpoint_path = os.path.join(experiment_dir, f'checkpoint_epoch_{epoch + 1}.pt')
             save_checkpoint(model, optimizer, epoch + 1, 
                           {'train_loss': train_loss, 'test_loss': test_loss}, 
-                          checkpoint_path, logger)
+                          checkpoint_path, logger, scaler=getattr(args, '_scaler', None))
         
         # TensorBoard logging
         if writer:
@@ -368,7 +375,8 @@ def train(args):
     # Final save
     logger.info("Saving final model...")
     final_path = os.path.join(experiment_dir, 'final_model.pt')
-    save_checkpoint(model, optimizer, args.num_epochs, {}, final_path, logger)
+    save_checkpoint(model, optimizer, args.num_epochs, {}, final_path, logger, 
+                   scaler=getattr(args, '_scaler', None))
     
     if writer:
         writer.close()
@@ -404,7 +412,15 @@ def test(args, peeking=False, model=None, epoch=None):
             ts_dropout=args.ts_dropout,
         ).to(device)
         logger.info("Model created successfully") 
-        load_checkpoint(args.checkpoint_path, model, logger=logger)
+        _, scaler = load_checkpoint(args.checkpoint_path, model, logger=logger)
+        
+        # Set scaler for proper data normalization and denormalization
+        if scaler is not None:
+            args._scaler = scaler
+            logger.info("Scaler loaded and set for TSLib standard testing")
+        else:
+            logger.warning("No scaler found in checkpoint - this will cause incorrect results!")
+        
         logger.info("Model weights loaded successfully") 
     else:
         assert(model is not None)
@@ -431,17 +447,48 @@ def test(args, peeking=False, model=None, epoch=None):
             
             loss = criterion(outputs, batch_y)
             
-            # Store predictions and ground truth
+            # Store predictions and ground truth (normalized for loss calculation)
             pred = outputs.detach().cpu()
             true = batch_y.detach().cpu()
             
             preds.append(pred)
             trues.append(true)
 
-
-            input = batch_x.detach().cpu().numpy()
-            gt = np.concatenate((input[0, :args.context_length, -1], true[0, :, -1]), axis=0)
-            pd = np.concatenate((input[0, :args.context_length, -1], pred[0, :, -1]), axis=0)
+            # TSLib standard: Denormalize for visualization only
+            input_np = batch_x.detach().cpu().numpy()
+            
+            if not peeking and hasattr(args, '_scaler') and args._scaler is not None:
+                # Denormalize for visualization (standalone testing only)
+                # Reconstruct full feature dimension for inverse transform
+                batch_size = pred.shape[0]
+                pred_full = np.zeros((batch_size, pred.shape[1], input_np.shape[2]))
+                true_full = np.zeros((batch_size, true.shape[1], input_np.shape[2]))
+                
+                pred_full[:, :, -1] = pred.numpy()[:, :, -1]  # Only last feature (target)
+                true_full[:, :, -1] = true.numpy()[:, :, -1]
+                
+                # Denormalize predictions and ground truth
+                pred_denorm = args._scaler.inverse_transform(
+                    pred_full.reshape(-1, input_np.shape[2])
+                ).reshape(pred_full.shape)
+                true_denorm = args._scaler.inverse_transform(
+                    true_full.reshape(-1, input_np.shape[2])
+                ).reshape(true_full.shape)
+                
+                # Also denormalize input context for consistent visualization
+                input_denorm = args._scaler.inverse_transform(
+                    input_np.reshape(-1, input_np.shape[2])
+                ).reshape(input_np.shape)
+                
+                # Create visualization with denormalized data
+                gt = np.concatenate((input_denorm[0, :args.context_length, -1], true_denorm[0, :, -1]), axis=0)
+                pd = np.concatenate((input_denorm[0, :args.context_length, -1], pred_denorm[0, :, -1]), axis=0)
+            else:
+                # Use normalized data for visualization (during peeking or no scaler)
+                gt = np.concatenate((input_np[0, :args.context_length, -1], true[0, :, -1].numpy()), axis=0)
+                pd = np.concatenate((input_np[0, :args.context_length, -1], pred[0, :, -1].numpy()), axis=0)
+            
+            # Generate visualization
             if peeking:
                 if (i % 20 == 0 and (epoch + 1) % 10 == 0):
                     visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch + 1}.png'))
@@ -471,9 +518,9 @@ def test(args, peeking=False, model=None, epoch=None):
 
     
 
-    # Calculate metrics
+    # Calculate metrics on normalized data (TSLib standard)
     mae, mse, _, _, _ = metric(preds, trues)
-    logger.info(f'MSE: {mse:.7f}, MAE: {mae:.7f}')
+    logger.info(f'MSE (normalized): {mse:.7f}, MAE (normalized): {mae:.7f}')
     
     if peeking:
         model.train()  # Return to training mode
@@ -481,8 +528,41 @@ def test(args, peeking=False, model=None, epoch=None):
 
     # Save results
     os.makedirs(args.output_dir, exist_ok=True)
-    with open(os.path.join(args.output_dir, "test_results.txt"), 'w') as f:
-        f.write(f'MSE: {mse:.7f}, MAE: {mae:.7f}\n')
+    
+    # TSLib standard: Also calculate denormalized metrics for interpretation
+    if hasattr(args, '_scaler') and args._scaler is not None:
+        logger.info("Computing denormalized metrics for interpretation...")
+        
+        # Denormalize all predictions and ground truth for evaluation
+        preds_full = np.zeros((preds.shape[0], preds.shape[1], len(args._scaler.mean_)))
+        trues_full = np.zeros((trues.shape[0], trues.shape[1], len(args._scaler.mean_)))
+        
+        preds_full[:, :, -1] = preds[:, :, -1]  # Only target feature
+        trues_full[:, :, -1] = trues[:, :, -1]
+        
+        preds_denorm = args._scaler.inverse_transform(
+            preds_full.reshape(-1, preds_full.shape[2])
+        ).reshape(preds_full.shape)[:, :, -1:] # Keep only target dimension
+        
+        trues_denorm = args._scaler.inverse_transform(
+            trues_full.reshape(-1, trues_full.shape[2])
+        ).reshape(trues_full.shape)[:, :, -1:] # Keep only target dimension
+        
+        # Calculate denormalized metrics
+        mae_denorm, mse_denorm, _, _, _ = metric(preds_denorm, trues_denorm)
+        logger.info(f'MSE (denormalized): {mse_denorm:.7f}, MAE (denormalized): {mae_denorm:.7f}')
+        
+        # Save both normalized and denormalized results
+        with open(os.path.join(args.output_dir, "test_results.txt"), 'w') as f:
+            f.write(f'Normalized - MSE: {mse:.7f}, MAE: {mae:.7f}\n')
+            f.write(f'Denormalized - MSE: {mse_denorm:.7f}, MAE: {mae_denorm:.7f}\n')
+        
+        np.save(os.path.join(args.output_dir, 'test_pred_denorm.npy'), preds_denorm)
+        np.save(os.path.join(args.output_dir, 'test_true_denorm.npy'), trues_denorm)
+        np.save(os.path.join(args.output_dir, 'test_metrics_denorm.npy'), np.array([mae_denorm, mse_denorm]))
+    else:
+        with open(os.path.join(args.output_dir, "test_results.txt"), 'w') as f:
+            f.write(f'MSE: {mse:.7f}, MAE: {mae:.7f}\n')
 
     np.save(os.path.join(args.output_dir, 'test_metrics.npy'), np.array([mae, mse]))
     np.save(os.path.join(args.output_dir, 'test_pred.npy'), preds)
@@ -519,7 +599,10 @@ def inference(args):
     # Load checkpoint if provided
     if args.checkpoint_path and not args.no_checkpoint:
         try:
-            load_checkpoint(args.checkpoint_path, model, logger=logger)
+            _, scaler = load_checkpoint(args.checkpoint_path, model, logger=logger)
+            if scaler is not None:
+                args._scaler = scaler
+                logger.info("Scaler loaded for denormalized inference outputs")
             logger.info("Using pretrained checkpoint")
         except Exception as e:
             logger.error(f"Failed to load checkpoint: {str(e)}")
@@ -575,8 +658,32 @@ def inference(args):
         all_predictions = np.concatenate(predictions, axis=0)
         all_contexts = np.concatenate(contexts, axis=0)
         
+        # Save normalized predictions
         np.save(os.path.join(inference_dir, "predictions.npy"), all_predictions)
         np.save(os.path.join(inference_dir, "contexts.npy"), all_contexts)
+        
+        # TSLib standard: Also save denormalized predictions if scaler is available
+        if hasattr(args, '_scaler') and args._scaler is not None:
+            logger.info("Saving denormalized predictions...")
+            
+            # Denormalize predictions
+            pred_full = np.zeros((all_predictions.shape[0], all_predictions.shape[1], len(args._scaler.mean_)))
+            pred_full[:, :, -1] = all_predictions[:, :, -1]  # Only target feature
+            
+            pred_denorm = args._scaler.inverse_transform(
+                pred_full.reshape(-1, pred_full.shape[2])
+            ).reshape(pred_full.shape)[:, :, -1:]
+            
+            # Denormalize contexts
+            context_denorm = args._scaler.inverse_transform(
+                all_contexts.reshape(-1, all_contexts.shape[2])
+            ).reshape(all_contexts.shape)
+            
+            np.save(os.path.join(inference_dir, "predictions_denorm.npy"), pred_denorm)
+            np.save(os.path.join(inference_dir, "contexts_denorm.npy"), context_denorm)
+            
+            logger.info(f"Saved denormalized predictions shape: {pred_denorm.shape}")
+            logger.info(f"Saved denormalized contexts shape: {context_denorm.shape}")
         
         logger.info(f"Saved predictions shape: {all_predictions.shape}")
         logger.info(f"Saved contexts shape: {all_contexts.shape}")
