@@ -26,6 +26,8 @@ from util import visual
 
 from model import ViTToTimeSeriesModel, create_model
 
+from cuda_device_mapper import CUDADeviceMapper
+
 logger = logging.getLogger(__name__)
 
 
@@ -119,7 +121,7 @@ def parse_arguments():
                        help="Run inference without loading checkpoint (uses random weights)")
     
     # Device arguments
-    parser.add_argument("--device", type=str, default="auto",
+    parser.add_argument("--device", type=str, default="cuda",
                        help="Device to use (auto, cpu, cuda)")
     parser.add_argument("--mixed_precision", action="store_true",
                        help="Use mixed precision training")
@@ -148,12 +150,18 @@ def parse_arguments():
     return args
 
 
-def get_device(device_arg: str, cuda_num: int) -> torch.device:
+def get_device(args) -> torch.device:
     """Get the appropriate device."""
-    if device_arg == "auto":
-        return torch.device(f"cuda:{cuda_num}" if torch.cuda.is_available() else "cpu")
+    if hasattr(args, 'device') and hasattr(args, 'cuda_num'):
+        print(f"Setting up device mapping for: {args.cuda_num}")
+        mapper = CUDADeviceMapper()
+        mapper.print_mapping()  # Show the mapping
+        device = mapper.set_device_from_config(args.cuda_num)
+        args.device = device
+        print(f"Device mapping complete. Using: {device}")
+        return device
     else:
-        return torch.device(device_arg)
+        exit("Device error!")
 
 
 def create_optimizer_and_scheduler(model: nn.Module, args):
@@ -236,7 +244,7 @@ def train(args):
     """Main training function with teacher forcing."""
     
     # Setup
-    device = get_device(args.device, args.cuda_num)
+    device = get_device(args)
     experiment_dir = os.path.join(args.output_dir, args.experiment_name)
     os.makedirs(experiment_dir, exist_ok=True)
     
@@ -386,7 +394,7 @@ def train(args):
 def test(args, peeking=False, model=None, epoch=None):
     """Test the model using inference mode (no teacher forcing)."""
     
-    device = get_device(args.device, args.cuda_num)
+    device = get_device(args)
     
     if not args.checkpoint_path and not peeking:
         raise ValueError("checkpoint_path must be specified for testing")
@@ -573,7 +581,7 @@ def test(args, peeking=False, model=None, epoch=None):
 def inference(args):
     """Run inference on new data using autoregressive generation."""
     
-    device = get_device(args.device, args.cuda_num)
+    device = get_device(args)
     
     if not args.no_checkpoint and not args.checkpoint_path:
         raise ValueError("checkpoint_path must be specified for inference, or use --no_checkpoint for trial run")
