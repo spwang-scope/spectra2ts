@@ -43,8 +43,12 @@ class Dataset_Custom(Dataset):
         '''
         cols = list(df_raw.columns)
         cols.remove(self.target)
-        cols.remove('date')
-        df_raw = df_raw[['date'] + cols + [self.target]]
+        if 'date' in cols:
+            cols.remove('date')
+            df_raw = df_raw[['date'] + cols + [self.target]]
+        else:
+            cols.insert(0, 'date')  # add a dummy date column if not present
+            df_raw = df_raw[cols + [self.target]]
         num_train = int(len(df_raw) * 0.8)
         num_test = len(df_raw) - num_train
         border1s = [0, len(df_raw) - num_test - self.context_length]
