@@ -59,15 +59,18 @@ class Dataset_Custom(Dataset):
         data = df_data.values
         
         # TSLib Standard: Feature-wise StandardScaler normalization
-        if self.flag == 'train':
+        if self.flag == 'train' and self.scaler is None:
             # Fit scaler on training data only
             train_data = data[border1s[0]:border2s[0]]
             self.scaler = StandardScaler()
             self.scaler.fit(train_data)
-        
-        # Apply scaler transformation (fitted on training data)
-        if self.scaler is not None:
             data = self.scaler.transform(data)
+        elif self.flag == 'test':   # For test, use the scaler found in loaded checkpoint
+            if self.scaler is not None:
+                data = self.scaler.transform(data)
+            else:
+                raise ValueError("Scaler not found.")
+
         
         data = torch.FloatTensor(data)
 

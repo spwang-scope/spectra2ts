@@ -399,9 +399,6 @@ def test(args, peeking=False, model=None, epoch=None):
     if not args.checkpoint_path and not peeking:
         raise ValueError("checkpoint_path must be specified for testing")
     
-    # Create data loaders
-    test_data, test_loader = data_provider(args, flag='test')
-    
     # Create and load model
     if not peeking:
         logger.info("Creating model for testing...")
@@ -431,6 +428,9 @@ def test(args, peeking=False, model=None, epoch=None):
         logger.info("Model weights loaded successfully") 
     else:
         assert(model is not None)
+
+    # Create data loaders
+    test_data, test_loader = data_provider(args, flag='test')
 
     preds = []
     trues = []
