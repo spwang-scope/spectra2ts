@@ -43,8 +43,12 @@ class Dataset_Custom(Dataset):
         '''
         cols = list(df_raw.columns)
         cols.remove(self.target)
-        cols.remove('date')
-        df_raw = df_raw[['date'] + cols + [self.target]]
+        if 'date' in cols:
+            cols.remove('date')
+            df_raw = df_raw[['date'] + cols + [self.target]]
+        else:
+            cols.insert(0, 'date')  # add a dummy date column if not present
+            df_raw = df_raw[cols + [self.target]]
         num_train = int(len(df_raw) * 0.8)
         num_test = len(df_raw) - num_train
         border1s = [0, len(df_raw) - num_test - self.context_length]
@@ -59,15 +63,18 @@ class Dataset_Custom(Dataset):
         data = df_data.values
         
         # TSLib Standard: Feature-wise StandardScaler normalization
-        if self.flag == 'train':
+        if self.flag == 'train' and self.scaler is None:
             # Fit scaler on training data only
             train_data = data[border1s[0]:border2s[0]]
             self.scaler = StandardScaler()
             self.scaler.fit(train_data)
-        
-        # Apply scaler transformation (fitted on training data)
-        if self.scaler is not None:
             data = self.scaler.transform(data)
+        elif self.flag == 'test':   # For test, use the scaler found in loaded checkpoint
+            if self.scaler is not None:
+                data = self.scaler.transform(data)
+            else:
+                raise ValueError("Scaler not found.")
+
         
         data = torch.FloatTensor(data)
 
