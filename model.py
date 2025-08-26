@@ -52,6 +52,72 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+class DecoderPositionalEncoding(nn.Module):
+    """
+    Dynamic positional encoding for transformer decoder that computes encodings on-the-fly.
+    Allows for variable prediction lengths without fixed buffer size limitations.
+    Maintains backward compatibility with checkpoints trained using fixed PositionalEncoding.
+    """
+    
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 10000):
+        super().__init__()
+        self.d_model = d_model
+        self.dropout = nn.Dropout(p=dropout)
+        self.max_len = max_len
+        
+        # Pre-compute div_term for efficiency (this doesn't depend on sequence length)
+        self.register_buffer('div_term', torch.exp(
+            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+        ))
+        
+        # Cache for computed positional encodings to avoid recomputation
+        self._pe_cache = {}
+    
+    def _compute_pe(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        """Compute positional encoding for given sequence length."""
+        if seq_len > self.max_len:
+            raise ValueError(f"Sequence length {seq_len} exceeds maximum length {self.max_len}")
+            
+        # Check cache first
+        cache_key = (seq_len, device.type, device.index if device.index is not None else 0)
+        if cache_key in self._pe_cache:
+            return self._pe_cache[cache_key]
+        
+        # Compute positional encoding
+        pe = torch.zeros(seq_len, self.d_model, device=device)
+        position = torch.arange(0, seq_len, dtype=torch.float, device=device).unsqueeze(1)
+        div_term = self.div_term.to(device)
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # Shape: (1, seq_len, d_model)
+        
+        # Cache the result (limit cache size to prevent memory issues)
+        if len(self._pe_cache) < 100:  # Reasonable cache limit
+            self._pe_cache[cache_key] = pe
+            
+        return pe
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor of shape (batch_size, seq_length, d_model)
+        """
+        seq_len = x.size(1)
+        device = x.device
+        
+        # Get or compute positional encoding for this sequence length
+        pe = self._compute_pe(seq_len, device)
+        
+        # Add positional encoding and apply dropout
+        x = x + pe
+        return self.dropout(x)
+    
+    def clear_cache(self):
+        """Clear the positional encoding cache."""
+        self._pe_cache.clear()
+
+
 class TransformerDecoderLayer(nn.Module):
     """
     Custom transformer decoder layer with self-attention and cross-attention.
@@ -154,8 +220,8 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         # Embedding for time series values
         self.value_embedding = nn.Linear(time_series_dim, d_model)
         
-        # Positional encoding
-        self.pos_encoding = PositionalEncoding(d_model, max_len=prediction_length + 1, dropout=dropout)
+        # Dynamic positional encoding for variable prediction lengths
+        self.pos_encoding = DecoderPositionalEncoding(d_model, dropout=dropout)
         
         # Project encoder output to decoder dimension for cross-attention
         self.encoder_projection = nn.Linear(encoder_dim, d_model)

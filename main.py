@@ -214,11 +214,60 @@ def save_checkpoint(model: ViTToTimeSeriesModel, optimizer: optim.Optimizer, epo
 
 def load_checkpoint(filepath: str, model: ViTToTimeSeriesModel, 
                    optimizer: Optional[optim.Optimizer] = None, logger = None) -> tuple:
-    """Load model checkpoint and return epoch and scaler."""
+    """Load model checkpoint with smart handling for decoder positional encoding compatibility."""
     try:
-        checkpoint = torch.load(filepath, map_location='cpu')
+        # Get current model's prediction length
+        current_prediction_length = model.prediction_length
+        current_pos_encoding_type = type(model.ts_decoder.pos_encoding).__name__
         
-        model.load_state_dict(checkpoint['model_state_dict'])
+        if logger:
+            logger.info(f'Current model prediction_length: {current_prediction_length}')
+            logger.info(f'Current model uses: {current_pos_encoding_type}')
+        
+        checkpoint = torch.load(filepath, map_location='cpu')
+        model_state = checkpoint['model_state_dict']
+        
+        # Check if checkpoint has old fixed positional encoding
+        pos_encoding_keys = [k for k in model_state.keys() if k.startswith('ts_decoder.pos_encoding.')]
+        has_fixed_pe = any('pe' in key for key in pos_encoding_keys)  # Check for 'pe' buffer
+        
+        if has_fixed_pe:
+            # Extract prediction length from checkpoint's positional encoding shape
+            pe_key = 'ts_decoder.pos_encoding.pe'
+            if pe_key in model_state:
+                checkpoint_pe_shape = model_state[pe_key].shape
+                checkpoint_prediction_length = checkpoint_pe_shape[1] - 1  # Subtract 1 for start token
+                
+                if logger:
+                    logger.info(f'Checkpoint has fixed PositionalEncoding with prediction_length: {checkpoint_prediction_length}')
+                    logger.info(f'Checkpoint positional encoding shape: {checkpoint_pe_shape}')
+                    
+                    if current_pos_encoding_type == 'DecoderPositionalEncoding':
+                        logger.info('Current model uses DecoderPositionalEncoding (dynamic)')
+                        if current_prediction_length != checkpoint_prediction_length:
+                            logger.info(f'Prediction length mismatch: current={current_prediction_length}, checkpoint={checkpoint_prediction_length}')
+                            logger.info('Skipping checkpoint positional encoding parameters - using dynamic computation')
+                        else:
+                            logger.info('Prediction lengths match, but still using dynamic encoding for flexibility')
+                    
+                # Remove positional encoding parameters from checkpoint for dynamic replacement
+                for key in pos_encoding_keys:
+                    if 'pe' in key:  # Only remove the 'pe' buffer, keep other params like dropout
+                        del model_state[key]
+                        if logger:
+                            logger.info(f'Removed checkpoint parameter: {key}')
+        else:
+            if logger:
+                logger.info('Checkpoint already uses dynamic positional encoding')
+        
+        # Load the model state dict (strict=False only for positional encoding buffer)
+        missing_keys, unexpected_keys = model.load_state_dict(model_state, strict=False)
+        
+        # Check if missing keys are only expected positional encoding parameters
+        unexpected_missing = [k for k in missing_keys if not k.startswith('ts_decoder.pos_encoding.pe')]
+        if unexpected_missing:
+            if logger:
+                logger.warning(f'Unexpected missing keys (not positional encoding): {unexpected_missing}')
         
         if optimizer is not None and 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
