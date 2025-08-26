@@ -264,7 +264,7 @@ def load_checkpoint(filepath: str, model: ViTToTimeSeriesModel,
         missing_keys, unexpected_keys = model.load_state_dict(model_state, strict=False)
         
         # Check if missing keys are only expected positional encoding parameters
-        unexpected_missing = [k for k in missing_keys if not k.startswith('ts_decoder.pos_encoding.pe')]
+        unexpected_missing = [k for k in missing_keys if not k.startswith('ts_decoder.pos_encoding.')]
         if unexpected_missing:
             if logger:
                 logger.warning(f'Unexpected missing keys (not positional encoding): {unexpected_missing}')
