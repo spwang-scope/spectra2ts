@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional
 import logging
 import glob
 import warnings
+import signal
 from datetime import datetime
 
 import torch
@@ -77,7 +78,7 @@ def parse_arguments():
                        help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
                        help="Learning rate")
-    parser.add_argument("--num_epochs", type=int, default=200,
+    parser.add_argument("--num_epochs", type=int, default=50,
                        help="Number of training epochs")
     parser.add_argument("--weight_decay", type=float, default=1e-5,
                        help="Weight decay for optimizer")
@@ -361,6 +362,15 @@ def train(args):
     train_loss_history = []
     logger.info(f"Early stopping patience: {args.early_stopping_patience} epochs")
     
+    # Signal handler for Ctrl+C interrupt
+    interrupted = False
+    def signal_handler(signum, frame):
+        nonlocal interrupted
+        logger.info("\nCtrl+C detected! Saving current model state...")
+        interrupted = True
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
     for epoch in range(start_epoch, args.num_epochs):
         logger.info(f"Starting epoch {epoch}/{args.num_epochs}")
         
@@ -407,6 +417,17 @@ def train(args):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             optimizer.step()
+            
+            # Check for interrupt signal during training
+            if interrupted:
+                logger.info("Interrupt detected during epoch. Saving current state...")
+                interrupt_path = os.path.join(experiment_dir, f'interrupted_epoch_{epoch + 1}.pt')
+                save_checkpoint(model, optimizer, epoch + 1, 
+                              {'train_loss': np.average(train_loss) if train_loss else 0.0}, 
+                              interrupt_path, logger, scaler=getattr(args, '_scaler', None))
+                logger.info(f"Model saved to {interrupt_path}")
+                logger.info("Exiting training due to interrupt...")
+                return
 
         logger.info(f"Epoch: {epoch + 1} cost time: {time.time() - epoch_time:.2f}s")
         train_loss = np.average(train_loss)
@@ -444,6 +465,17 @@ def train(args):
                               early_stop_path, logger, scaler=getattr(args, '_scaler', None))
                 logger.info(f"Early stopping checkpoint saved to {early_stop_path}")
                 break
+        
+        # Check for interrupt signal after epoch
+        if interrupted:
+            logger.info("Interrupt detected after epoch completion. Saving final state...")
+            interrupt_path = os.path.join(experiment_dir, f'interrupted_epoch_{epoch + 1}_final.pt')
+            save_checkpoint(model, optimizer, epoch + 1, 
+                          {'train_loss': train_loss, 'test_loss': test_loss}, 
+                          interrupt_path, logger, scaler=getattr(args, '_scaler', None))
+            logger.info(f"Model saved to {interrupt_path}")
+            logger.info("Exiting training due to interrupt...")
+            break
         
         # Learning rate scheduling
         if scheduler:
