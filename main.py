@@ -105,8 +105,6 @@ def parse_arguments():
                        help="Save model every N epochs")
     parser.add_argument("--eval_interval", type=int, default=5,
                        help="Evaluate model every N epochs")
-    parser.add_argument("--early_stopping_patience", type=int, default=20,
-                       help="Number of epochs to look back for early stopping (default: 20)")
     
     # Mode arguments
     parser.add_argument("--mode", type=str, default="train",
@@ -358,9 +356,6 @@ def train(args):
     logger.info(f"Device: {device}")
     logger.info("Using custom Transformer decoder with cross-attention and teacher forcing")
     
-    # Early stopping setup
-    train_loss_history = []
-    logger.info(f"Early stopping patience: {args.early_stopping_patience} epochs")
     
     # Signal handler for Ctrl+C interrupt
     interrupted = False
@@ -437,34 +432,6 @@ def train(args):
         
         logger.info(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.7f} Test Loss: {test_loss:.7f}")
         
-        # Add current train loss to history
-        train_loss_history.append(train_loss)
-        
-        # Early stopping check
-        if len(train_loss_history) >= 2:  # Need at least 2 values to compare
-            # Determine how many values to compare with
-            n_compare = min(args.early_stopping_patience, len(train_loss_history) - 1)
-            recent_losses = train_loss_history[-n_compare-1:-1]  # Get last n values (excluding current)
-            current_loss = train_loss_history[-1]
-            
-            # Count how many recent losses are greater than current loss
-            better_count = sum(1 for loss in recent_losses if loss > current_loss)
-            better_percentage = (better_count / len(recent_losses)) * 100
-            
-            logger.info(f"Early stopping check: {better_count}/{len(recent_losses)} ({better_percentage:.1f}%) recent losses are higher than current")
-            
-            # If less than 25% of recent losses are better (greater) than current, stop training
-            if better_percentage < 25.0:
-                logger.info(f"Early stopping triggered! Less than 25% of recent {len(recent_losses)} losses are higher than current loss.")
-                logger.info("Saving model and stopping training...")
-                
-                # Save early stopping checkpoint
-                early_stop_path = os.path.join(experiment_dir, f'early_stop_epoch_{epoch + 1}.pt')
-                save_checkpoint(model, optimizer, epoch + 1, 
-                              {'train_loss': train_loss, 'test_loss': test_loss}, 
-                              early_stop_path, logger, scaler=getattr(args, '_scaler', None), args=args)
-                logger.info(f"Early stopping checkpoint saved to {early_stop_path}")
-                break
         
         # Check for interrupt signal after epoch
         if interrupted:
