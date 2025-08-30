@@ -291,7 +291,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
                 if i == len(self.output_projection) - 1:  # Final layer
                     # Smaller initialization for final output layer
                     nn.init.xavier_uniform_(layer.weight, gain=0.01)
-                    nn.init.constant_(layer.bias, 0.0)
+                    nn.init.constant_(layer.bias, 0.1)
                 else:
                     nn.init.xavier_uniform_(layer.weight)
                     nn.init.constant_(layer.bias, 0.0)
