@@ -158,14 +158,12 @@ class TransformerDecoderLayer(nn.Module):
         tgt: torch.Tensor,
         memory: torch.Tensor,
         tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Args:
             tgt: Target sequence from decoder (batch_size, tgt_len, d_model)
             memory: Encoder output (batch_size, src_len, d_model)
             tgt_mask: Causal mask for target sequence
-            memory_mask: Mask for encoder output (optional)
             
         Returns:
             Output tensor (batch_size, tgt_len, d_model)
@@ -177,7 +175,7 @@ class TransformerDecoderLayer(nn.Module):
         
         # Cross-attention with residual connection
         # Q from decoder (tgt), K and V from encoder (memory)
-        tgt2 = self.cross_attn(tgt, memory, memory, attn_mask=memory_mask)[0]
+        tgt2 = self.cross_attn(tgt, memory, memory)[0]
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
         
@@ -442,8 +440,7 @@ class ViTToTimeSeriesModel(nn.Module):
     
     def __init__(
         self,
-        image_size: int = 64,  # Height is always 64
-        num_channels: int = 3,
+        num_channels: int = 1,
         prediction_length: int = 96,
         context_length: int = 96,
         feature_projection_dim: int = 128,
@@ -453,14 +450,11 @@ class ViTToTimeSeriesModel(nn.Module):
         ts_num_layers: int = 4,
         ts_dim_feedforward: int = 1024,
         ts_dropout: float = 0.1,
-        image_mean: list = [0.485, 0.456, 0.406],
-        image_std: list = [0.229, 0.224, 0.225],
     ):
         """
         Initialize the model.
         
         Args:
-            image_size: Height of spectrogram (always 64)
             num_channels: Number of channels in spectrogram
             prediction_length: Length of time series to predict
             context_length: Length of context window
@@ -484,9 +478,6 @@ class ViTToTimeSeriesModel(nn.Module):
         self.ts_model_dim = ts_model_dim
         self.num_channels = num_channels
         
-        # Image normalization parameters
-        self.register_buffer('image_mean', torch.tensor(image_mean).view(1, 3, 1, 1))
-        self.register_buffer('image_std', torch.tensor(image_std).view(1, 3, 1, 1))
         
         # Rectangular ViT Encoder (128x128 spectrograms)
         self.vit_encoder = create_rectangular_vit(
@@ -519,22 +510,6 @@ class ViTToTimeSeriesModel(nn.Module):
         )
         
         # TSLib standard: no additional normalization in model (handled in data loader)
-    
-    def encode_spectrogram_to_features(self, spectrogram: torch.Tensor) -> torch.Tensor:
-        """
-        Encode spectrogram to feature representation using ViT (CORAL bridge skipped).
-        
-        Args:
-            spectrogram: Spectrogram tensor (batch_size, channels, height=64, width=context_length)
-            
-        Returns:
-            Encoded features (batch_size, num_patches+1, 768)
-        """
-        # Get all token features from ViT
-        vit_features = self.vit_encoder.get_last_hidden_state(spectrogram)  # (batch, num_patches+1, 768)
-        
-        # Skip CORAL domain bridge - return ViT features directly
-        return vit_features
     
     def forward(self, context: torch.Tensor, tf_target: torch.Tensor = None, mode: str = 'train') -> torch.Tensor:
         """
