@@ -40,7 +40,7 @@ def setup_logging(args):
         level=getattr(logging, args.log_level.upper()),
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(os.path.join(args.output_dir, 'training.log')),
+            logging.FileHandler(os.path.join(args.output_dir, f'{args.mode}.log')),
             logging.StreamHandler()
         ]
     )
@@ -93,8 +93,6 @@ def parse_arguments():
                        help="Directory containing dataset")
     parser.add_argument("--data_filename", type=str, default="ETTh1.csv",
                        help="Directory containing dataset")
-    parser.add_argument("--image_size", type=int, default=64,
-                       help="Height of spectrogram (always 64)")
     parser.add_argument("--num_workers", type=int, default=4,
                        help="Number of data loading workers")
     parser.add_argument("--augment", action="store_true",
@@ -140,7 +138,7 @@ def parse_arguments():
     
     args = parser.parse_args()
     args.target = 'OT'
-    args.output_dir = f"./outputs_{timestamp}_{args.data_filename.split('.')[0]}_{args.mode}_{args.prediction_length}"
+    args.output_dir = f"./outputs_{timestamp}_{args.data_filename.split('.')[0]}_{args.mode}_{args.context_length}_{args.prediction_length}"
     
     def get_df_channel():
         df = pd.read_csv(os.path.join(args.data_dir,
@@ -198,7 +196,7 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
 
 
 def save_checkpoint(model: ViTToTimeSeriesModel, optimizer: optim.Optimizer, epoch: int, 
-                   metrics: Dict[str, float], filepath: str, logger, scaler=None):
+                   metrics: Dict[str, float], filepath: str, logger, scaler=None, args=None):
     """Save model checkpoint."""
     try:
         checkpoint = {
@@ -208,6 +206,9 @@ def save_checkpoint(model: ViTToTimeSeriesModel, optimizer: optim.Optimizer, epo
             'metrics': metrics,
             'scaler': scaler,  # Save scaler for TSLib standard testing
         }
+        
+        if args and args.mode == 'train':
+            checkpoint['args'] = vars(args)
         
         torch.save(checkpoint, filepath)
         logger.info(f'Checkpoint saved: {filepath}')
@@ -308,7 +309,6 @@ def train(args):
     # Create model
     logger.info("Creating ViT-to-TimeSeries model with Transformer decoder...")
     model = create_model(
-        image_size=args.image_size,
         num_channels=args.num_channels,
         prediction_length=args.prediction_length,
         context_length=args.context_length,
@@ -424,7 +424,7 @@ def train(args):
                 interrupt_path = os.path.join(experiment_dir, f'interrupted_epoch_{epoch + 1}.pt')
                 save_checkpoint(model, optimizer, epoch + 1, 
                               {'train_loss': np.average(train_loss) if train_loss else 0.0}, 
-                              interrupt_path, logger, scaler=getattr(args, '_scaler', None))
+                              interrupt_path, logger, scaler=getattr(args, '_scaler', None), args=args)
                 logger.info(f"Model saved to {interrupt_path}")
                 logger.info("Exiting training due to interrupt...")
                 return
@@ -462,7 +462,7 @@ def train(args):
                 early_stop_path = os.path.join(experiment_dir, f'early_stop_epoch_{epoch + 1}.pt')
                 save_checkpoint(model, optimizer, epoch + 1, 
                               {'train_loss': train_loss, 'test_loss': test_loss}, 
-                              early_stop_path, logger, scaler=getattr(args, '_scaler', None))
+                              early_stop_path, logger, scaler=getattr(args, '_scaler', None), args=args)
                 logger.info(f"Early stopping checkpoint saved to {early_stop_path}")
                 break
         
@@ -472,7 +472,7 @@ def train(args):
             interrupt_path = os.path.join(experiment_dir, f'interrupted_epoch_{epoch + 1}_final.pt')
             save_checkpoint(model, optimizer, epoch + 1, 
                           {'train_loss': train_loss, 'test_loss': test_loss}, 
-                          interrupt_path, logger, scaler=getattr(args, '_scaler', None))
+                          interrupt_path, logger, scaler=getattr(args, '_scaler', None), args=args)
             logger.info(f"Model saved to {interrupt_path}")
             logger.info("Exiting training due to interrupt...")
             break
@@ -487,7 +487,7 @@ def train(args):
             checkpoint_path = os.path.join(experiment_dir, f'checkpoint_epoch_{epoch + 1}.pt')
             save_checkpoint(model, optimizer, epoch + 1, 
                           {'train_loss': train_loss, 'test_loss': test_loss}, 
-                          checkpoint_path, logger, scaler=getattr(args, '_scaler', None))
+                          checkpoint_path, logger, scaler=getattr(args, '_scaler', None), args=args)
         
         # TensorBoard logging
         if writer:
@@ -499,7 +499,7 @@ def train(args):
     logger.info("Saving final model...")
     final_path = os.path.join(experiment_dir, 'final_model.pt')
     save_checkpoint(model, optimizer, args.num_epochs, {}, final_path, logger, 
-                   scaler=getattr(args, '_scaler', None))
+                   scaler=getattr(args, '_scaler', None), args=args)
     
     if writer:
         writer.close()
@@ -519,7 +519,6 @@ def test(args, peeking=False, model=None, epoch=None):
     if not peeking:
         logger.info("Creating model for testing...")
         model = create_model(
-            image_size=args.image_size,
             num_channels=args.num_channels,
             prediction_length=args.prediction_length,
             context_length=args.context_length,
@@ -705,7 +704,6 @@ def inference(args):
     # Create model
     logger.info("Creating model for inference...")
     model = create_model(
-        image_size=args.image_size,
         num_channels=args.num_channels,
         prediction_length=args.prediction_length,
         context_length=args.context_length,
