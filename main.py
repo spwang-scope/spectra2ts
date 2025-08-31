@@ -55,19 +55,19 @@ def parse_arguments():
     
     # Model arguments
     parser.add_argument("--pred_len", type=int, default=96,
-                       help="Length of time series to predict"}
+                       help="Length of time series to predict")
     parser.add_argument("--seq_len", type=int, default=96,
-                       help="Length of context window"}
+                       help="Length of context window")
     parser.add_argument("--feature_projection_dim", type=int, default=128,
                        help="Dimension for QKV vectors in decoder cross-attention")
     parser.add_argument("--time_series_dim", type=int, default=1,
                        help="Dimension of time series (1 for univariate)")
     parser.add_argument("--d_model", type=int, default=768,
-                       help="Hidden dimension for transformer decoder"}
+                       help="Hidden dimension for transformer decoder")
     parser.add_argument("--n_heads", type=int, default=8,
-                       help="Number of attention heads"}
+                       help="Number of attention heads")
     parser.add_argument("--d_layers", type=int, default=3,
-                       help="Number of decoder layers"}
+                       help="Number of decoder layers")
     parser.add_argument("--d_ff", type=int, default=1024,
                        help="Feed-forward dimension")
     parser.add_argument("--dropout", type=float, default=0.1,
