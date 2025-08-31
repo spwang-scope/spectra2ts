@@ -54,23 +54,23 @@ def parse_arguments():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Model arguments
-    parser.add_argument("--prediction_length", type=int, default=96,
-                       help="Length of time series to predict")
-    parser.add_argument("--context_length", type=int, default=96,
-                       help="Length of context window")
+    parser.add_argument("--pred_len", type=int, default=96,
+                       help="Length of time series to predict"}
+    parser.add_argument("--seq_len", type=int, default=96,
+                       help="Length of context window"}
     parser.add_argument("--feature_projection_dim", type=int, default=128,
-                       help="Dimension for CORAL feature projection")
+                       help="Dimension for QKV vectors in decoder cross-attention")
     parser.add_argument("--time_series_dim", type=int, default=1,
                        help="Dimension of time series (1 for univariate)")
-    parser.add_argument("--ts_model_dim", type=int, default=768,
-                       help="Hidden dimension for transformer decoder")
-    parser.add_argument("--ts_num_heads", type=int, default=8,
-                       help="Number of attention heads")
-    parser.add_argument("--ts_num_layers", type=int, default=3,
-                       help="Number of decoder layers")
-    parser.add_argument("--ts_dim_feedforward", type=int, default=1024,
+    parser.add_argument("--d_model", type=int, default=768,
+                       help="Hidden dimension for transformer decoder"}
+    parser.add_argument("--n_heads", type=int, default=8,
+                       help="Number of attention heads"}
+    parser.add_argument("--d_layers", type=int, default=3,
+                       help="Number of decoder layers"}
+    parser.add_argument("--d_ff", type=int, default=1024,
                        help="Feed-forward dimension")
-    parser.add_argument("--ts_dropout", type=float, default=0.1,
+    parser.add_argument("--dropout", type=float, default=0.1,
                        help="Dropout rate for transformer")
     
     # Training arguments
@@ -78,7 +78,7 @@ def parse_arguments():
                        help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
                        help="Learning rate")
-    parser.add_argument("--num_epochs", type=int, default=50,
+    parser.add_argument("--train_epochs", type=int, default=50,
                        help="Number of training epochs")
     parser.add_argument("--weight_decay", type=float, default=1e-5,
                        help="Weight decay for optimizer")
@@ -89,10 +89,10 @@ def parse_arguments():
                        help="Learning rate scheduler")
     
     # Data arguments
-    parser.add_argument("--data_dir", type=str, default="../dataset/ETT-small",
+    parser.add_argument("--root_path", type=str, default="../dataset/ETT-small",
                        help="Directory containing dataset")
-    parser.add_argument("--data_filename", type=str, default="ETTh1.csv",
-                       help="Directory containing dataset")
+    parser.add_argument("--data_path", type=str, default="ETTh1.csv",
+                       help="Dataset filename")
     parser.add_argument("--num_workers", type=int, default=4,
                        help="Number of data loading workers")
     parser.add_argument("--augment", action="store_true",
@@ -136,11 +136,11 @@ def parse_arguments():
     
     args = parser.parse_args()
     args.target = 'OT'
-    args.output_dir = f"./outputs_{timestamp}_{args.data_filename.split('.')[0]}_{args.mode}_{args.context_length}_{args.prediction_length}"
+    args.output_dir = f"./outputs_{timestamp}_{args.data_path.split('.')[0]}_{args.mode}_{args.seq_len}_{args.pred_len}"
     
     def get_df_channel():
-        df = pd.read_csv(os.path.join(args.data_dir,
-                                          args.data_filename))
+        df = pd.read_csv(os.path.join(args.root_path,
+                                          args.data_path))
         return df.shape[1]-1  # number of columns, exclude Datetime
     
     # Determine number of data channels since we want to construct model according to it
@@ -177,15 +177,15 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
     # Learning rate scheduler
     if args.scheduler == "cosine":
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.num_epochs, eta_min=1e-6
+            optimizer, T_max=args.train_epochs, eta_min=1e-6
         )
     elif args.scheduler == "step":
         scheduler = optim.lr_scheduler.StepLR(
-            optimizer, step_size=args.num_epochs // 3, gamma=0.1
+            optimizer, step_size=args.train_epochs // 3, gamma=0.1
         )
     elif args.scheduler == "linear":
         scheduler = optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=1.0, end_factor=0.1, total_iters=args.num_epochs
+            optimizer, start_factor=1.0, end_factor=0.1, total_iters=args.train_epochs
         )
     else:
         scheduler = None
@@ -308,15 +308,15 @@ def train(args):
     logger.info("Creating ViT-to-TimeSeries model with Transformer decoder...")
     model = create_model(
         num_channels=args.num_channels,
-        prediction_length=args.prediction_length,
-        context_length=args.context_length,
+        prediction_length=args.pred_len,
+        context_length=args.seq_len,
         feature_projection_dim=args.feature_projection_dim,
         time_series_dim=args.time_series_dim,
-        ts_model_dim=args.ts_model_dim,
-        ts_num_heads=args.ts_num_heads,
-        ts_num_layers=args.ts_num_layers,
-        ts_dim_feedforward=args.ts_dim_feedforward,
-        ts_dropout=args.ts_dropout
+        ts_model_dim=args.d_model,
+        ts_num_heads=args.n_heads,
+        ts_num_layers=args.d_layers,
+        ts_dim_feedforward=args.d_ff,
+        ts_dropout=args.dropout
     ).to(device)
     logger.info("Model created successfully")
 
@@ -366,8 +366,8 @@ def train(args):
     
     signal.signal(signal.SIGINT, signal_handler)
     
-    for epoch in range(start_epoch, args.num_epochs):
-        logger.info(f"Starting epoch {epoch}/{args.num_epochs}")
+    for epoch in range(start_epoch, args.train_epochs):
+        logger.info(f"Starting epoch {epoch}/{args.train_epochs}")
         
         iter_count = 0
         train_loss = []
@@ -388,10 +388,10 @@ def train(args):
             outputs = outputs[:, :, :].to(device)
             if hasattr(args, 'time_series_dim') and args.time_series_dim > 1:
                 # Multi-variable prediction: use last time_series_dim features
-                batch_y = batch_y[:, :args.prediction_length, -args.time_series_dim:].to(device)
+                batch_y = batch_y[:, :args.pred_len, -args.time_series_dim:].to(device)
             else:
                 # Single variable prediction: use last feature only
-                batch_y = batch_y[:, :args.prediction_length, -1:].to(device)
+                batch_y = batch_y[:, :args.pred_len, -1:].to(device)
             
             # Check for empty tensors
             if outputs.numel() == 0:
@@ -465,7 +465,7 @@ def train(args):
     # Final save
     logger.info("Saving final model...")
     final_path = os.path.join(experiment_dir, 'final_model.pt')
-    save_checkpoint(model, optimizer, args.num_epochs, {}, final_path, logger, 
+    save_checkpoint(model, optimizer, args.train_epochs, {}, final_path, logger, 
                    scaler=getattr(args, '_scaler', None), args=args)
     
     if writer:
@@ -487,15 +487,15 @@ def test(args, peeking=False, model=None, epoch=None):
         logger.info("Creating model for testing...")
         model = create_model(
             num_channels=args.num_channels,
-            prediction_length=args.prediction_length,
-            context_length=args.context_length,
+            prediction_length=args.pred_len,
+            context_length=args.seq_len,
             feature_projection_dim=args.feature_projection_dim,
             time_series_dim=args.time_series_dim,
-            ts_model_dim=args.ts_model_dim,
-            ts_num_heads=args.ts_num_heads,
-            ts_num_layers=args.ts_num_layers,
-            ts_dim_feedforward=args.ts_dim_feedforward,
-            ts_dropout=args.ts_dropout,
+            ts_model_dim=args.d_model,
+            ts_num_heads=args.n_heads,
+            ts_num_layers=args.d_layers,
+            ts_dim_feedforward=args.d_ff,
+            ts_dropout=args.dropout,
         ).to(device)
         logger.info("Model created successfully") 
         _, scaler = load_checkpoint(args.checkpoint_path, model, logger=logger)
@@ -527,12 +527,12 @@ def test(args, peeking=False, model=None, epoch=None):
             batch_y = batch_y.float().to(device)
 
             # Use inference mode (no teacher forcing)
-            outputs = model.inference(batch_x[:, :args.context_length, :])
+            outputs = model.inference(batch_x[:, :args.seq_len, :])
 
             # Calculate loss
             f_dim = -1
             outputs = outputs[:, :, :].to(device)
-            batch_y = batch_y[:, -args.prediction_length:, f_dim:].to(device)
+            batch_y = batch_y[:, -args.pred_len:, f_dim:].to(device)
             
             loss = criterion(outputs, batch_y)
             
@@ -570,12 +570,12 @@ def test(args, peeking=False, model=None, epoch=None):
                 ).reshape(input_np.shape)
                 
                 # Create visualization with denormalized data
-                gt = np.concatenate((input_denorm[0, :args.context_length, -1], true_denorm[0, :, -1]), axis=0)
-                pd = np.concatenate((input_denorm[0, :args.context_length, -1], pred_denorm[0, :, -1]), axis=0)
+                gt = np.concatenate((input_denorm[0, :args.seq_len, -1], true_denorm[0, :, -1]), axis=0)
+                pd = np.concatenate((input_denorm[0, :args.seq_len, -1], pred_denorm[0, :, -1]), axis=0)
             else:
                 # Use normalized data for visualization (during peeking or no scaler)
-                gt = np.concatenate((input_np[0, :args.context_length, -1], true[0, :, -1].numpy()), axis=0)
-                pd = np.concatenate((input_np[0, :args.context_length, -1], pred[0, :, -1].numpy()), axis=0)
+                gt = np.concatenate((input_np[0, :args.seq_len, -1], true[0, :, -1].numpy()), axis=0)
+                pd = np.concatenate((input_np[0, :args.seq_len, -1], pred[0, :, -1].numpy()), axis=0)
             
             # Generate visualization
             if peeking:
@@ -672,15 +672,15 @@ def inference(args):
     logger.info("Creating model for inference...")
     model = create_model(
         num_channels=args.num_channels,
-        prediction_length=args.prediction_length,
-        context_length=args.context_length,
+        prediction_length=args.pred_len,
+        context_length=args.seq_len,
         feature_projection_dim=args.feature_projection_dim,
         time_series_dim=args.time_series_dim,
-        ts_model_dim=args.ts_model_dim,
-        ts_num_heads=args.ts_num_heads,
-        ts_num_layers=args.ts_num_layers,
-        ts_dim_feedforward=args.ts_dim_feedforward,
-        ts_dropout=args.ts_dropout
+        ts_model_dim=args.d_model,
+        ts_num_heads=args.n_heads,
+        ts_num_layers=args.d_layers,
+        ts_dim_feedforward=args.d_ff,
+        ts_dropout=args.dropout
     ).to(device)
     logger.info("Model created successfully with Transformer decoder")
     
@@ -718,7 +718,7 @@ def inference(args):
             batch_x = batch_x.float().to(device)
             
             # Use only context for inference
-            context = batch_x[:, :args.context_length, :]
+            context = batch_x[:, :args.seq_len, :]
             
             # Generate predictions using inference mode
             logger.debug(f"Generating predictions for batch {i}...")

@@ -486,7 +486,7 @@ class ViTToTimeSeriesModel(nn.Module):
             in_channels=num_channels,
             embed_dim=768,
             depth=3,
-            num_heads=12,
+            num_heads=10,
             mlp_ratio=4,
             dropout=0.1
         )
