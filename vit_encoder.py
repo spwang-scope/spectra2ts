@@ -153,10 +153,10 @@ class RectangularViT(nn.Module):
     
     def __init__(
         self,
-        image_height=64,
-        image_width=96,  # Can be 96, 192, 336, or 720
+        image_height=128,
+        image_width=128,
         patch_size=8,
-        in_channels=3,
+        in_channels=1,
         num_classes=1000,
         embed_dim=768,
         depth=12,
@@ -291,7 +291,7 @@ class RectangularViT(nn.Module):
         return x  # Return all tokens including CLS
 
 
-def create_rectangular_vit(image_height=64, image_width=96, **kwargs):
+def create_rectangular_vit(image_height=128, image_width=128, **kwargs):
     """
     Factory function to create a rectangular ViT model.
     

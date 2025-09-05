@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional
 import logging
 import glob
 import warnings
+import signal
 from datetime import datetime
 
 import torch
@@ -39,7 +40,7 @@ def setup_logging(args):
         level=getattr(logging, args.log_level.upper()),
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(os.path.join(args.output_dir, 'training.log')),
+            logging.FileHandler(os.path.join(args.output_dir, f'{args.mode}.log')),
             logging.StreamHandler()
         ]
     )
@@ -53,23 +54,23 @@ def parse_arguments():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Model arguments
-    parser.add_argument("--prediction_length", type=int, default=96,
+    parser.add_argument("--pred_len", type=int, default=96,
                        help="Length of time series to predict")
-    parser.add_argument("--context_length", type=int, default=96,
+    parser.add_argument("--seq_len", type=int, default=96,
                        help="Length of context window")
     parser.add_argument("--feature_projection_dim", type=int, default=128,
-                       help="Dimension for CORAL feature projection")
+                       help="Dimension for QKV vectors in decoder cross-attention")
     parser.add_argument("--time_series_dim", type=int, default=1,
                        help="Dimension of time series (1 for univariate)")
-    parser.add_argument("--ts_model_dim", type=int, default=768,
+    parser.add_argument("--d_model", type=int, default=768,
                        help="Hidden dimension for transformer decoder")
-    parser.add_argument("--ts_num_heads", type=int, default=8,
+    parser.add_argument("--n_heads", type=int, default=8,
                        help="Number of attention heads")
-    parser.add_argument("--ts_num_layers", type=int, default=3,
+    parser.add_argument("--d_layers", type=int, default=3,
                        help="Number of decoder layers")
-    parser.add_argument("--ts_dim_feedforward", type=int, default=1024,
+    parser.add_argument("--d_ff", type=int, default=1024,
                        help="Feed-forward dimension")
-    parser.add_argument("--ts_dropout", type=float, default=0.1,
+    parser.add_argument("--dropout", type=float, default=0.1,
                        help="Dropout rate for transformer")
     
     # Training arguments
@@ -77,7 +78,7 @@ def parse_arguments():
                        help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
                        help="Learning rate")
-    parser.add_argument("--num_epochs", type=int, default=200,
+    parser.add_argument("--train_epochs", type=int, default=50,
                        help="Number of training epochs")
     parser.add_argument("--weight_decay", type=float, default=1e-5,
                        help="Weight decay for optimizer")
@@ -88,12 +89,10 @@ def parse_arguments():
                        help="Learning rate scheduler")
     
     # Data arguments
-    parser.add_argument("--data_dir", type=str, default="../dataset/ETT-small",
+    parser.add_argument("--root_path", type=str, default="../dataset/ETT-small",
                        help="Directory containing dataset")
-    parser.add_argument("--data_filename", type=str, default="ETTh1.csv",
-                       help="Directory containing dataset")
-    parser.add_argument("--image_size", type=int, default=64,
-                       help="Height of spectrogram (always 64)")
+    parser.add_argument("--data_path", type=str, default="ETTh1.csv",
+                       help="Dataset filename")
     parser.add_argument("--num_workers", type=int, default=4,
                        help="Number of data loading workers")
     parser.add_argument("--augment", action="store_true",
@@ -102,7 +101,7 @@ def parse_arguments():
     # Experiment arguments
     parser.add_argument("--experiment_name", type=str, default="vit_timeseries",
                        help="Name of the experiment")
-    parser.add_argument("--save_interval", type=int, default=50,
+    parser.add_argument("--save_interval", type=int, default=10,
                        help="Save model every N epochs")
     parser.add_argument("--eval_interval", type=int, default=5,
                        help="Evaluate model every N epochs")
@@ -137,11 +136,11 @@ def parse_arguments():
     
     args = parser.parse_args()
     args.target = 'OT'
-    args.output_dir = f"./outputs_{timestamp}_{args.data_filename.split('.')[0]}_{args.mode}_{args.prediction_length}"
+    args.output_dir = f"./outputs_{timestamp}_{args.data_path.split('.')[0]}_{args.mode}_{args.seq_len}_{args.pred_len}"
     
     def get_df_channel():
-        df = pd.read_csv(os.path.join(args.data_dir,
-                                          args.data_filename))
+        df = pd.read_csv(os.path.join(args.root_path,
+                                          args.data_path))
         return df.shape[1]-1  # number of columns, exclude Datetime
     
     # Determine number of data channels since we want to construct model according to it
@@ -178,15 +177,15 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
     # Learning rate scheduler
     if args.scheduler == "cosine":
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.num_epochs, eta_min=1e-6
+            optimizer, T_max=args.train_epochs, eta_min=1e-6
         )
     elif args.scheduler == "step":
         scheduler = optim.lr_scheduler.StepLR(
-            optimizer, step_size=args.num_epochs // 3, gamma=0.1
+            optimizer, step_size=args.train_epochs // 3, gamma=0.1
         )
     elif args.scheduler == "linear":
         scheduler = optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=1.0, end_factor=0.1, total_iters=args.num_epochs
+            optimizer, start_factor=1.0, end_factor=0.1, total_iters=args.train_epochs
         )
     else:
         scheduler = None
@@ -195,7 +194,7 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
 
 
 def save_checkpoint(model: ViTToTimeSeriesModel, optimizer: optim.Optimizer, epoch: int, 
-                   metrics: Dict[str, float], filepath: str, logger, scaler=None):
+                   metrics: Dict[str, float], filepath: str, logger, scaler=None, args=None):
     """Save model checkpoint."""
     try:
         checkpoint = {
@@ -206,6 +205,9 @@ def save_checkpoint(model: ViTToTimeSeriesModel, optimizer: optim.Optimizer, epo
             'scaler': scaler,  # Save scaler for TSLib standard testing
         }
         
+        if args and args.mode == 'train':
+            checkpoint['args'] = vars(args)
+        
         torch.save(checkpoint, filepath)
         logger.info(f'Checkpoint saved: {filepath}')
     except Exception as e:
@@ -214,11 +216,60 @@ def save_checkpoint(model: ViTToTimeSeriesModel, optimizer: optim.Optimizer, epo
 
 def load_checkpoint(filepath: str, model: ViTToTimeSeriesModel, 
                    optimizer: Optional[optim.Optimizer] = None, logger = None) -> tuple:
-    """Load model checkpoint and return epoch and scaler."""
+    """Load model checkpoint with smart handling for decoder positional encoding compatibility."""
     try:
-        checkpoint = torch.load(filepath, map_location='cpu')
+        # Get current model's prediction length
+        current_prediction_length = model.prediction_length
+        current_pos_encoding_type = type(model.ts_decoder.pos_encoding).__name__
         
-        model.load_state_dict(checkpoint['model_state_dict'])
+        if logger:
+            logger.info(f'Current model prediction_length: {current_prediction_length}')
+            logger.info(f'Current model uses: {current_pos_encoding_type}')
+        
+        checkpoint = torch.load(filepath, map_location='cpu')
+        model_state = checkpoint['model_state_dict']
+        
+        # Check if checkpoint has old fixed positional encoding
+        pos_encoding_keys = [k for k in model_state.keys() if k.startswith('ts_decoder.pos_encoding.')]
+        has_fixed_pe = any('pe' in key for key in pos_encoding_keys)  # Check for 'pe' buffer
+        
+        if has_fixed_pe:
+            # Extract prediction length from checkpoint's positional encoding shape
+            pe_key = 'ts_decoder.pos_encoding.pe'
+            if pe_key in model_state:
+                checkpoint_pe_shape = model_state[pe_key].shape
+                checkpoint_prediction_length = checkpoint_pe_shape[1] - 1  # Subtract 1 for start token
+                
+                if logger:
+                    logger.info(f'Checkpoint has fixed PositionalEncoding with prediction_length: {checkpoint_prediction_length}')
+                    logger.info(f'Checkpoint positional encoding shape: {checkpoint_pe_shape}')
+                    
+                    if current_pos_encoding_type == 'DecoderPositionalEncoding':
+                        logger.info('Current model uses DecoderPositionalEncoding (dynamic)')
+                        if current_prediction_length != checkpoint_prediction_length:
+                            logger.info(f'Prediction length mismatch: current={current_prediction_length}, checkpoint={checkpoint_prediction_length}')
+                            logger.info('Skipping checkpoint positional encoding parameters - using dynamic computation')
+                        else:
+                            logger.info('Prediction lengths match, but still using dynamic encoding for flexibility')
+                    
+                # Remove positional encoding parameters from checkpoint for dynamic replacement
+                for key in pos_encoding_keys:
+                    if 'pe' in key:  # Only remove the 'pe' buffer, keep other params like dropout
+                        del model_state[key]
+                        if logger:
+                            logger.info(f'Removed checkpoint parameter: {key}')
+        else:
+            if logger:
+                logger.info('Checkpoint already uses dynamic positional encoding')
+        
+        # Load the model state dict (strict=False only for positional encoding buffer)
+        missing_keys, unexpected_keys = model.load_state_dict(model_state, strict=False)
+        
+        # Check if missing keys are only expected positional encoding parameters
+        unexpected_missing = [k for k in missing_keys if not k.startswith('ts_decoder.pos_encoding.')]
+        if unexpected_missing:
+            if logger:
+                logger.warning(f'Unexpected missing keys (not positional encoding): {unexpected_missing}')
         
         if optimizer is not None and 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -256,17 +307,16 @@ def train(args):
     # Create model
     logger.info("Creating ViT-to-TimeSeries model with Transformer decoder...")
     model = create_model(
-        image_size=args.image_size,
         num_channels=args.num_channels,
-        prediction_length=args.prediction_length,
-        context_length=args.context_length,
+        prediction_length=args.pred_len,
+        context_length=args.seq_len,
         feature_projection_dim=args.feature_projection_dim,
         time_series_dim=args.time_series_dim,
-        ts_model_dim=args.ts_model_dim,
-        ts_num_heads=args.ts_num_heads,
-        ts_num_layers=args.ts_num_layers,
-        ts_dim_feedforward=args.ts_dim_feedforward,
-        ts_dropout=args.ts_dropout
+        ts_model_dim=args.d_model,
+        ts_num_heads=args.n_heads,
+        ts_num_layers=args.d_layers,
+        ts_dim_feedforward=args.d_ff,
+        ts_dropout=args.dropout
     ).to(device)
     logger.info("Model created successfully")
 
@@ -306,8 +356,18 @@ def train(args):
     logger.info(f"Device: {device}")
     logger.info("Using custom Transformer decoder with cross-attention and teacher forcing")
     
-    for epoch in range(start_epoch, args.num_epochs):
-        logger.info(f"Starting epoch {epoch}/{args.num_epochs}")
+    
+    # Signal handler for Ctrl+C interrupt
+    interrupted = False
+    def signal_handler(signum, frame):
+        nonlocal interrupted
+        logger.info("\nCtrl+C detected! Saving current model state...")
+        interrupted = True
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    for epoch in range(start_epoch, args.train_epochs):
+        logger.info(f"Starting epoch {epoch}/{args.train_epochs}")
         
         iter_count = 0
         train_loss = []
@@ -328,10 +388,10 @@ def train(args):
             outputs = outputs[:, :, :].to(device)
             if hasattr(args, 'time_series_dim') and args.time_series_dim > 1:
                 # Multi-variable prediction: use last time_series_dim features
-                batch_y = batch_y[:, :args.prediction_length, -args.time_series_dim:].to(device)
+                batch_y = batch_y[:, :args.pred_len, -args.time_series_dim:].to(device)
             else:
                 # Single variable prediction: use last feature only
-                batch_y = batch_y[:, :args.prediction_length, -1:].to(device)
+                batch_y = batch_y[:, :args.pred_len, -1:].to(device)
             
             # Check for empty tensors
             if outputs.numel() == 0:
@@ -352,6 +412,17 @@ def train(args):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             optimizer.step()
+            
+            # Check for interrupt signal during training
+            if interrupted:
+                logger.info("Interrupt detected during epoch. Saving current state...")
+                interrupt_path = os.path.join(experiment_dir, f'interrupted_epoch_{epoch + 1}.pt')
+                save_checkpoint(model, optimizer, epoch + 1, 
+                              {'train_loss': np.average(train_loss) if train_loss else 0.0}, 
+                              interrupt_path, logger, scaler=getattr(args, '_scaler', None), args=args)
+                logger.info(f"Model saved to {interrupt_path}")
+                logger.info("Exiting training due to interrupt...")
+                return
 
         logger.info(f"Epoch: {epoch + 1} cost time: {time.time() - epoch_time:.2f}s")
         train_loss = np.average(train_loss)
@@ -360,6 +431,18 @@ def train(args):
         test_loss = test(args, peeking=True, model=model, epoch=epoch)
         
         logger.info(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.7f} Test Loss: {test_loss:.7f}")
+        
+        
+        # Check for interrupt signal after epoch
+        if interrupted:
+            logger.info("Interrupt detected after epoch completion. Saving final state...")
+            interrupt_path = os.path.join(experiment_dir, f'interrupted_epoch_{epoch + 1}_final.pt')
+            save_checkpoint(model, optimizer, epoch + 1, 
+                          {'train_loss': train_loss, 'test_loss': test_loss}, 
+                          interrupt_path, logger, scaler=getattr(args, '_scaler', None), args=args)
+            logger.info(f"Model saved to {interrupt_path}")
+            logger.info("Exiting training due to interrupt...")
+            break
         
         # Learning rate scheduling
         if scheduler:
@@ -371,7 +454,7 @@ def train(args):
             checkpoint_path = os.path.join(experiment_dir, f'checkpoint_epoch_{epoch + 1}.pt')
             save_checkpoint(model, optimizer, epoch + 1, 
                           {'train_loss': train_loss, 'test_loss': test_loss}, 
-                          checkpoint_path, logger, scaler=getattr(args, '_scaler', None))
+                          checkpoint_path, logger, scaler=getattr(args, '_scaler', None), args=args)
         
         # TensorBoard logging
         if writer:
@@ -382,8 +465,8 @@ def train(args):
     # Final save
     logger.info("Saving final model...")
     final_path = os.path.join(experiment_dir, 'final_model.pt')
-    save_checkpoint(model, optimizer, args.num_epochs, {}, final_path, logger, 
-                   scaler=getattr(args, '_scaler', None))
+    save_checkpoint(model, optimizer, args.train_epochs, {}, final_path, logger, 
+                   scaler=getattr(args, '_scaler', None), args=args)
     
     if writer:
         writer.close()
@@ -403,17 +486,16 @@ def test(args, peeking=False, model=None, epoch=None):
     if not peeking:
         logger.info("Creating model for testing...")
         model = create_model(
-            image_size=args.image_size,
             num_channels=args.num_channels,
-            prediction_length=args.prediction_length,
-            context_length=args.context_length,
+            prediction_length=args.pred_len,
+            context_length=args.seq_len,
             feature_projection_dim=args.feature_projection_dim,
             time_series_dim=args.time_series_dim,
-            ts_model_dim=args.ts_model_dim,
-            ts_num_heads=args.ts_num_heads,
-            ts_num_layers=args.ts_num_layers,
-            ts_dim_feedforward=args.ts_dim_feedforward,
-            ts_dropout=args.ts_dropout,
+            ts_model_dim=args.d_model,
+            ts_num_heads=args.n_heads,
+            ts_num_layers=args.d_layers,
+            ts_dim_feedforward=args.d_ff,
+            ts_dropout=args.dropout,
         ).to(device)
         logger.info("Model created successfully") 
         _, scaler = load_checkpoint(args.checkpoint_path, model, logger=logger)
@@ -445,12 +527,12 @@ def test(args, peeking=False, model=None, epoch=None):
             batch_y = batch_y.float().to(device)
 
             # Use inference mode (no teacher forcing)
-            outputs = model.inference(batch_x[:, :args.context_length, :])
+            outputs = model.inference(batch_x[:, :args.seq_len, :])
 
             # Calculate loss
             f_dim = -1
             outputs = outputs[:, :, :].to(device)
-            batch_y = batch_y[:, -args.prediction_length:, f_dim:].to(device)
+            batch_y = batch_y[:, -args.pred_len:, f_dim:].to(device)
             
             loss = criterion(outputs, batch_y)
             
@@ -488,12 +570,12 @@ def test(args, peeking=False, model=None, epoch=None):
                 ).reshape(input_np.shape)
                 
                 # Create visualization with denormalized data
-                gt = np.concatenate((input_denorm[0, :args.context_length, -1], true_denorm[0, :, -1]), axis=0)
-                pd = np.concatenate((input_denorm[0, :args.context_length, -1], pred_denorm[0, :, -1]), axis=0)
+                gt = np.concatenate((input_denorm[0, :args.seq_len, -1], true_denorm[0, :, -1]), axis=0)
+                pd = np.concatenate((input_denorm[0, :args.seq_len, -1], pred_denorm[0, :, -1]), axis=0)
             else:
                 # Use normalized data for visualization (during peeking or no scaler)
-                gt = np.concatenate((input_np[0, :args.context_length, -1], true[0, :, -1].numpy()), axis=0)
-                pd = np.concatenate((input_np[0, :args.context_length, -1], pred[0, :, -1].numpy()), axis=0)
+                gt = np.concatenate((input_np[0, :args.seq_len, -1], true[0, :, -1].numpy()), axis=0)
+                pd = np.concatenate((input_np[0, :args.seq_len, -1], pred[0, :, -1].numpy()), axis=0)
             
             # Generate visualization
             if peeking:
@@ -589,17 +671,16 @@ def inference(args):
     # Create model
     logger.info("Creating model for inference...")
     model = create_model(
-        image_size=args.image_size,
         num_channels=args.num_channels,
-        prediction_length=args.prediction_length,
-        context_length=args.context_length,
+        prediction_length=args.pred_len,
+        context_length=args.seq_len,
         feature_projection_dim=args.feature_projection_dim,
         time_series_dim=args.time_series_dim,
-        ts_model_dim=args.ts_model_dim,
-        ts_num_heads=args.ts_num_heads,
-        ts_num_layers=args.ts_num_layers,
-        ts_dim_feedforward=args.ts_dim_feedforward,
-        ts_dropout=args.ts_dropout
+        ts_model_dim=args.d_model,
+        ts_num_heads=args.n_heads,
+        ts_num_layers=args.d_layers,
+        ts_dim_feedforward=args.d_ff,
+        ts_dropout=args.dropout
     ).to(device)
     logger.info("Model created successfully with Transformer decoder")
     
@@ -637,7 +718,7 @@ def inference(args):
             batch_x = batch_x.float().to(device)
             
             # Use only context for inference
-            context = batch_x[:, :args.context_length, :]
+            context = batch_x[:, :args.seq_len, :]
             
             # Generate predictions using inference mode
             logger.debug(f"Generating predictions for batch {i}...")

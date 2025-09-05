@@ -52,6 +52,72 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+class DecoderPositionalEncoding(nn.Module):
+    """
+    Dynamic positional encoding for transformer decoder that computes encodings on-the-fly.
+    Allows for variable prediction lengths without fixed buffer size limitations.
+    Maintains backward compatibility with checkpoints trained using fixed PositionalEncoding.
+    """
+    
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 10000):
+        super().__init__()
+        self.d_model = d_model
+        self.dropout = nn.Dropout(p=dropout)
+        self.max_len = max_len
+        
+        # Pre-compute div_term for efficiency (this doesn't depend on sequence length)
+        self.register_buffer('div_term', torch.exp(
+            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+        ))
+        
+        # Cache for computed positional encodings to avoid recomputation
+        self._pe_cache = {}
+    
+    def _compute_pe(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        """Compute positional encoding for given sequence length."""
+        if seq_len > self.max_len:
+            raise ValueError(f"Sequence length {seq_len} exceeds maximum length {self.max_len}")
+            
+        # Check cache first
+        cache_key = (seq_len, device.type, device.index if device.index is not None else 0)
+        if cache_key in self._pe_cache:
+            return self._pe_cache[cache_key]
+        
+        # Compute positional encoding
+        pe = torch.zeros(seq_len, self.d_model, device=device)
+        position = torch.arange(0, seq_len, dtype=torch.float, device=device).unsqueeze(1)
+        div_term = self.div_term.to(device)
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # Shape: (1, seq_len, d_model)
+        
+        # Cache the result (limit cache size to prevent memory issues)
+        if len(self._pe_cache) < 100:  # Reasonable cache limit
+            self._pe_cache[cache_key] = pe
+            
+        return pe
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor of shape (batch_size, seq_length, d_model)
+        """
+        seq_len = x.size(1)
+        device = x.device
+        
+        # Get or compute positional encoding for this sequence length
+        pe = self._compute_pe(seq_len, device)
+        
+        # Add positional encoding and apply dropout
+        x = x + pe
+        return self.dropout(x)
+    
+    def clear_cache(self):
+        """Clear the positional encoding cache."""
+        self._pe_cache.clear()
+
+
 class TransformerDecoderLayer(nn.Module):
     """
     Custom transformer decoder layer with self-attention and cross-attention.
@@ -92,14 +158,12 @@ class TransformerDecoderLayer(nn.Module):
         tgt: torch.Tensor,
         memory: torch.Tensor,
         tgt_mask: Optional[torch.Tensor] = None,
-        memory_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Args:
             tgt: Target sequence from decoder (batch_size, tgt_len, d_model)
             memory: Encoder output (batch_size, src_len, d_model)
             tgt_mask: Causal mask for target sequence
-            memory_mask: Mask for encoder output (optional)
             
         Returns:
             Output tensor (batch_size, tgt_len, d_model)
@@ -111,7 +175,7 @@ class TransformerDecoderLayer(nn.Module):
         
         # Cross-attention with residual connection
         # Q from decoder (tgt), K and V from encoder (memory)
-        tgt2 = self.cross_attn(tgt, memory, memory, attn_mask=memory_mask)[0]
+        tgt2 = self.cross_attn(tgt, memory, memory)[0]
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
         
@@ -154,8 +218,8 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         # Embedding for time series values
         self.value_embedding = nn.Linear(time_series_dim, d_model)
         
-        # Positional encoding
-        self.pos_encoding = PositionalEncoding(d_model, max_len=prediction_length + 1, dropout=dropout)
+        # Dynamic positional encoding for variable prediction lengths
+        self.pos_encoding = DecoderPositionalEncoding(d_model, dropout=dropout)
         
         # Project encoder output to decoder dimension for cross-attention
         self.encoder_projection = nn.Linear(encoder_dim, d_model)
@@ -227,7 +291,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
                 if i == len(self.output_projection) - 1:  # Final layer
                     # Smaller initialization for final output layer
                     nn.init.xavier_uniform_(layer.weight, gain=0.01)
-                    nn.init.constant_(layer.bias, 0.0)
+                    nn.init.constant_(layer.bias, 0.1)
                 else:
                     nn.init.xavier_uniform_(layer.weight)
                     nn.init.constant_(layer.bias, 0.0)
@@ -376,8 +440,7 @@ class ViTToTimeSeriesModel(nn.Module):
     
     def __init__(
         self,
-        image_size: int = 64,  # Height is always 64
-        num_channels: int = 3,
+        num_channels: int = 1,
         prediction_length: int = 96,
         context_length: int = 96,
         feature_projection_dim: int = 128,
@@ -387,14 +450,11 @@ class ViTToTimeSeriesModel(nn.Module):
         ts_num_layers: int = 4,
         ts_dim_feedforward: int = 1024,
         ts_dropout: float = 0.1,
-        image_mean: list = [0.485, 0.456, 0.406],
-        image_std: list = [0.229, 0.224, 0.225],
     ):
         """
         Initialize the model.
         
         Args:
-            image_size: Height of spectrogram (always 64)
             num_channels: Number of channels in spectrogram
             prediction_length: Length of time series to predict
             context_length: Length of context window
@@ -418,9 +478,6 @@ class ViTToTimeSeriesModel(nn.Module):
         self.ts_model_dim = ts_model_dim
         self.num_channels = num_channels
         
-        # Image normalization parameters
-        self.register_buffer('image_mean', torch.tensor(image_mean).view(1, 3, 1, 1))
-        self.register_buffer('image_std', torch.tensor(image_std).view(1, 3, 1, 1))
         
         # Rectangular ViT Encoder (128x128 spectrograms)
         self.vit_encoder = create_rectangular_vit(
@@ -429,7 +486,7 @@ class ViTToTimeSeriesModel(nn.Module):
             in_channels=num_channels,
             embed_dim=768,
             depth=3,
-            num_heads=12,
+            num_heads=10,
             mlp_ratio=4,
             dropout=0.1
         )
@@ -453,22 +510,6 @@ class ViTToTimeSeriesModel(nn.Module):
         )
         
         # TSLib standard: no additional normalization in model (handled in data loader)
-    
-    def encode_spectrogram_to_features(self, spectrogram: torch.Tensor) -> torch.Tensor:
-        """
-        Encode spectrogram to feature representation using ViT (CORAL bridge skipped).
-        
-        Args:
-            spectrogram: Spectrogram tensor (batch_size, channels, height=64, width=context_length)
-            
-        Returns:
-            Encoded features (batch_size, num_patches+1, 768)
-        """
-        # Get all token features from ViT
-        vit_features = self.vit_encoder.get_last_hidden_state(spectrogram)  # (batch, num_patches+1, 768)
-        
-        # Skip CORAL domain bridge - return ViT features directly
-        return vit_features
     
     def forward(self, context: torch.Tensor, tf_target: torch.Tensor = None, mode: str = 'train') -> torch.Tensor:
         """

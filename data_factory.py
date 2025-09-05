@@ -6,10 +6,10 @@ def data_provider(args, flag):
     shuffle_flag = False if (flag == 'test' or flag == 'TEST') else True
     batch_size = args.batch_size
 
-    if args.data_dir is None:
-        raise ValueError("data_dir does not exist")
-    if args.data_filename is None:
-        raise ValueError("data_filename does not exist")
+    if args.root_path is None:
+        raise ValueError("root_path does not exist")
+    if args.data_path is None:
+        raise ValueError("data_path does not exist")
 
     if flag == 'test':
         shuffle_flag = False
@@ -22,8 +22,8 @@ def data_provider(args, flag):
     if flag == 'train':
         data_set = Dataset_Custom(
             args = args,
-            root_path=args.data_dir,
-            data_path=args.data_filename,
+            root_path=args.root_path,
+            data_path=args.data_path,
             flag=flag,
             size=[args.context_length, args.prediction_length],
             target=args.target
@@ -35,8 +35,8 @@ def data_provider(args, flag):
         scaler = getattr(args, '_scaler', None)
         data_set = Dataset_Custom(
             args = args,
-            root_path=args.data_dir,
-            data_path=args.data_filename,
+            root_path=args.root_path,
+            data_path=args.data_path,
             flag=flag,
             size=[args.context_length, args.prediction_length],
             target=args.target,
