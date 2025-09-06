@@ -90,7 +90,7 @@ class Dataset_Custom(Dataset):
     def __getitem__(self, index):
         s_begin = index
         s_end = s_begin + self.context_length
-        r_begin = s_begin + 1
+        r_begin = s_end + 1
         r_end = r_begin + self.prediction_length
 
         seq_x = self.data_x[s_begin:s_end]
