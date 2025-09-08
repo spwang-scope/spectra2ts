@@ -64,7 +64,7 @@ def parse_arguments():
                        help="Dimension of time series (1 for univariate)")
     parser.add_argument("--d_model", type=int, default=768,
                        help="Hidden dimension for transformer decoder")
-    parser.add_argument("--n_heads", type=int, default=8,
+    parser.add_argument("--n_heads", type=int, default=12,
                        help="Number of attention heads")
     parser.add_argument("--d_layers", type=int, default=3,
                        help="Number of decoder layers")
@@ -152,12 +152,12 @@ def parse_arguments():
 def get_device(args) -> torch.device:
     """Get the appropriate device."""
     if hasattr(args, 'device') and hasattr(args, 'cuda_num'):
-        print(f"Setting up device mapping for: {args.cuda_num}")
+        #print(f"Setting up device mapping for: {args.cuda_num}")
         mapper = CUDADeviceMapper()
-        mapper.print_mapping()  # Show the mapping
+        #mapper.print_mapping()  # Show the mapping
         device = mapper.set_device_from_config(args.cuda_num)
         args.device = device
-        print(f"Device mapping complete. Using: {device}")
+        #print(f"Device mapping complete. Using: {device}")
         return device
     else:
         exit("Device error!")

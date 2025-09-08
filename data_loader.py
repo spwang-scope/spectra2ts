@@ -18,8 +18,8 @@ class Dataset_Custom(Dataset):
         self.args = args
         # info
         
-        self.context_length = size[0]
-        self.prediction_length = size[1]
+        self.seq_len = size[0]
+        self.pred_len = size[1]
 
         # init
         type_map = {'train': 0, 'test': 1}
@@ -45,10 +45,11 @@ class Dataset_Custom(Dataset):
         cols.remove(self.target)
         cols.remove('date')
         df_raw = df_raw[['date'] + cols + [self.target]]
-        num_train = int(len(df_raw) * 0.8)
-        num_test = len(df_raw) - num_train
-        border1s = [0, len(df_raw) - num_test - self.context_length]
-        border2s = [num_train, len(df_raw)]
+        num_train = int(len(df_raw) * 0.7)
+        num_test = int(len(df_raw) * 0.2)
+        num_vali = len(df_raw) - num_train - num_test
+        border1s = [0, num_train, len(df_raw) - num_test]
+        border2s = [num_train, num_train + num_vali, len(df_raw)]
         border1 = border1s[self.set_type]
         border2 = border2s[self.set_type]
 
@@ -65,7 +66,7 @@ class Dataset_Custom(Dataset):
             self.scaler = StandardScaler()
             self.scaler.fit(train_data)
             data = self.scaler.transform(data)
-        elif self.flag == 'test':   # For test, use the scaler found in loaded checkpoint
+        elif self.flag != 'train':   # For test/valid, use the scaler found in loaded checkpoint
             if self.scaler is not None:
                 data = self.scaler.transform(data)
             else:
@@ -85,9 +86,9 @@ class Dataset_Custom(Dataset):
 
     def __getitem__(self, index):
         s_begin = index
-        s_end = s_begin + self.context_length
-        r_begin = s_begin + 1
-        r_end = r_begin + self.prediction_length
+        s_end = s_begin + self.seq_len
+        r_begin = s_end + 1
+        r_end = r_begin + self.pred_len
 
         seq_x = self.data_x[s_begin:s_end]
         seq_y = self.data_y[r_begin:r_end]
@@ -95,4 +96,4 @@ class Dataset_Custom(Dataset):
         return seq_x, seq_y
 
     def __len__(self):
-        return len(self.data_x) - self.context_length - self.prediction_length + 1
+        return len(self.data_x) - self.seq_len - self.pred_len + 1
