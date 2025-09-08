@@ -262,7 +262,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         self.value_embedding = nn.Linear(time_series_dim, d_model)
         
         # Dynamic positional encoding for variable prediction lengths
-        self.pos_encoding = PositionalEncoding(d_model, dropout=dropout)
+        self.pos_encoding = DecoderPositionalEncoding(d_model, dropout=dropout)
         
         # Project encoder output to decoder dimension for cross-attention
         self.encoder_projection = nn.Linear(encoder_dim, d_model)
@@ -529,7 +529,7 @@ class ViTToTimeSeriesModel(nn.Module):
             in_channels=num_channels,
             embed_dim=768,
             depth=3,
-            num_heads=12,
+            num_heads=10,
             mlp_ratio=4,
             dropout=0.1
         )

@@ -25,7 +25,7 @@ def data_provider(args, flag):
             root_path=args.root_path,
             data_path=args.data_path,
             flag=flag,
-            size=[args.seq_len, args.pred_len],
+            size=[args.context_length, args.prediction_length],
             target=args.target
         )
         # Store scaler for test dataset
@@ -38,7 +38,7 @@ def data_provider(args, flag):
             root_path=args.root_path,
             data_path=args.data_path,
             flag=flag,
-            size=[args.seq_len, args.pred_len],
+            size=[args.context_length, args.prediction_length],
             target=args.target,
             scaler=scaler
         )
