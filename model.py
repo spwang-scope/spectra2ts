@@ -117,6 +117,49 @@ class DecoderPositionalEncoding(nn.Module):
         """Clear the positional encoding cache."""
         self._pe_cache.clear()
 
+class _MultiheadAttention(nn.Module):
+    def __init__(self, d_model, n_heads, res_attention=False, attn_dropout=0., proj_dropout=0., qkv_bias=True):
+        """Multi Head Attention Layer
+        Input shape:
+            Q:       [batch_size (bs) x pred_patch_num x d_model]
+            K, V:    [batch_size (bs) x seq_patch_num x d_model]
+        """
+        super().__init__()
+        d_h = d_model // n_heads
+
+        self.scale = d_h**-0.5
+        self.n_heads, self.d_h = n_heads, d_h
+
+        self.W_Q = nn.Linear(d_model, d_h * n_heads, bias=qkv_bias)
+        self.W_K = nn.Linear(d_model, d_h * n_heads, bias=qkv_bias)
+        self.W_V = nn.Linear(d_model, d_h * n_heads, bias=qkv_bias)
+
+        self.res_attention = res_attention
+        self.attn_dropout = nn.Dropout(attn_dropout)
+        
+        self.to_out = nn.Sequential(nn.Linear(n_heads * d_h, d_model), nn.Dropout(proj_dropout))
+
+    def forward(self, Q:nn.Tensor, K:nn.Tensor, V:nn.Tensor, prev=None):
+
+        bs = Q.size(0)
+        # Linear (+ split in multiple heads)
+        q_s = self.W_Q(Q).view(bs, -1, self.n_heads, self.d_h)     
+        k_s = self.W_K(K).view(bs, -1, self.n_heads, self.d_h) 
+        v_s = self.W_V(V).view(bs, -1, self.n_heads, self.d_h) 
+
+        attn_scores = torch.einsum('bphd, bshd -> bphs', q_s, k_s) * self.scale
+        
+        if prev is not None: attn_scores = attn_scores + prev
+        
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.attn_dropout(attn_weights)
+
+        output = torch.einsum('bphs, bshd -> bphd', attn_weights, v_s)
+        output = output.contiguous().view(bs, -1, self.n_heads*self.d_h)
+        output = self.to_out(output)
+
+        if self.res_attention: return output, attn_weights, attn_scores
+        else: return output, attn_weights
 
 class TransformerDecoderLayer(nn.Module):
     """
@@ -134,12 +177,12 @@ class TransformerDecoderLayer(nn.Module):
         super().__init__()
         
         # Self-attention
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.self_attn = _MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
         self.norm1 = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(dropout)
         
         # Cross-attention
-        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.cross_attn = _MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout2 = nn.Dropout(dropout)
         
