@@ -8,7 +8,6 @@ using CORAL domain bridging and proper cross-attention mechanism.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchtune.modules import MultiHeadAttention
 from typing import Optional, Dict, Any, Tuple
 import numpy as np
 import math
@@ -485,7 +484,7 @@ class ViTToTimeSeriesModel(nn.Module):
             in_channels=num_channels,
             embed_dim=768,
             depth=3,
-            num_heads=10,
+            num_heads=6,
             mlp_ratio=4,
             dropout=0.1
         )
