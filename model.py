@@ -51,7 +51,7 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
 
-
+'''
 class DecoderPositionalEncoding(nn.Module):
     """
     Dynamic positional encoding for transformer decoder that computes encodings on-the-fly.
@@ -116,6 +116,7 @@ class DecoderPositionalEncoding(nn.Module):
     def clear_cache(self):
         """Clear the positional encoding cache."""
         self._pe_cache.clear()
+'''
 
 class TransformerDecoderLayer(nn.Module):
     """
@@ -217,7 +218,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         self.value_embedding = nn.Linear(time_series_dim, d_model)
         
         # Dynamic positional encoding for variable prediction lengths
-        self.pos_encoding = DecoderPositionalEncoding(d_model, dropout=dropout)
+        self.pos_encoding = PositionalEncoding(d_model, dropout=dropout)
         
         # Project encoder output to decoder dimension for cross-attention
         self.encoder_projection = nn.Linear(encoder_dim, d_model)
