@@ -398,7 +398,7 @@ def train(args):
         train_loss = np.average(train_loss)
         
         # Evaluate on test set
-        test_loss = test(args, peeking=True, model=model, epoch=epoch)+
+        test_loss = test(args, peeking=True, model=model, epoch=epoch)
         vali_loss = vali(args, model=model)
         
         logger.info(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.7f} Val Loss: {vali_loss:.7f} Test Loss: {test_loss:.7f} ")
@@ -422,9 +422,9 @@ def train(args):
 
 def vali(args, model):
     device = get_device(args)
-    criterion = nn.HuberLoss(delta=0.1)
+    criterion = nn.MSELoss()
     # Create data loaders
-    test_data, val_loader = data_provider(args, flag='val')
+    vali_data, val_loader = data_provider(args, flag='val')
     logger.info(f"Created data loaders: {len(val_loader)} vals")
 
     preds = []
