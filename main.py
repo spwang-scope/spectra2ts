@@ -152,9 +152,9 @@ def parse_arguments():
 def get_device(args) -> torch.device:
     """Get the appropriate device."""
     if hasattr(args, 'device') and hasattr(args, 'cuda_num'):
-        print(f"Setting up device mapping for: {args.cuda_num}")
+        #print(f"Setting up device mapping for: {args.cuda_num}")
         mapper = CUDADeviceMapper()
-        mapper.print_mapping()  # Show the mapping
+        #mapper.print_mapping()  # Show the mapping
         device = mapper.set_device_from_config(args.cuda_num)
         args.device = device
         print(f"Device mapping complete. Using: {device}")
@@ -301,8 +301,7 @@ def train(args):
     
     # Create data loaders
     train_dataset, train_loader = data_provider(args, flag='train')
-    test_dataset, test_loader = data_provider(args, flag='test')
-    logger.info(f"Created data loaders: {len(train_loader)} trains {len(test_loader)} tests")
+    logger.info(f"Created data loaders: {len(train_loader)} trains")
     
     # Create model
     logger.info("Creating ViT-to-TimeSeries model with Transformer decoder...")
@@ -339,14 +338,9 @@ def train(args):
     optimizer, scheduler = create_optimizer_and_scheduler(model, args)
     criterion = nn.HuberLoss(delta=0.1)  
     
-    # Setup tensorboard
-    writer = None
-    if args.tensorboard:
-        logger.info("Setting up TensorBoard logging...")
-        writer = SummaryWriter(os.path.join(experiment_dir, 'tensorboard'))
-    
     # Training loop
     start_epoch = 0
+    start_max_vali_loss = float('inf')
     
     if args.checkpoint_path:
         logger.info(f"Loading checkpoint from {args.checkpoint_path}...")
@@ -354,17 +348,6 @@ def train(args):
     
     logger.info(f"Starting training from epoch {start_epoch}")
     logger.info(f"Device: {device}")
-    logger.info("Using custom Transformer decoder with cross-attention and teacher forcing")
-    
-    
-    # Signal handler for Ctrl+C interrupt
-    interrupted = False
-    def signal_handler(signum, frame):
-        nonlocal interrupted
-        logger.info("\nCtrl+C detected! Saving current model state...")
-        interrupted = True
-    
-    signal.signal(signal.SIGINT, signal_handler)
     
     for epoch in range(start_epoch, args.train_epochs):
         logger.info(f"Starting epoch {epoch}/{args.train_epochs}")
@@ -407,72 +390,76 @@ def train(args):
 
             loss.backward()
             
-            # Gradient clipping during warmup
-            if epoch < args.warmup_epochs:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             optimizer.step()
-            
-            # Check for interrupt signal during training
-            if interrupted:
-                logger.info("Interrupt detected during epoch. Saving current state...")
-                interrupt_path = os.path.join(experiment_dir, f'interrupted_epoch_{epoch + 1}.pt')
-                save_checkpoint(model, optimizer, epoch + 1, 
-                              {'train_loss': np.average(train_loss) if train_loss else 0.0}, 
-                              interrupt_path, logger, scaler=getattr(args, '_scaler', None), args=args)
-                logger.info(f"Model saved to {interrupt_path}")
-                logger.info("Exiting training due to interrupt...")
-                return
 
         logger.info(f"Epoch: {epoch + 1} cost time: {time.time() - epoch_time:.2f}s")
         train_loss = np.average(train_loss)
         
         # Evaluate on test set
-        test_loss = test(args, peeking=True, model=model, epoch=epoch)
+        test_loss = test(args, peeking=True, model=model, epoch=epoch)+
+        vali_loss = vali(args, model=model)
         
-        logger.info(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.7f} Test Loss: {test_loss:.7f}")
+        logger.info(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.7f} Val Loss: {vali_loss:.7f} Test Loss: {test_loss:.7f} ")
         
-        
-        # Check for interrupt signal after epoch
-        if interrupted:
-            logger.info("Interrupt detected after epoch completion. Saving final state...")
-            interrupt_path = os.path.join(experiment_dir, f'interrupted_epoch_{epoch + 1}_final.pt')
-            save_checkpoint(model, optimizer, epoch + 1, 
-                          {'train_loss': train_loss, 'test_loss': test_loss}, 
-                          interrupt_path, logger, scaler=getattr(args, '_scaler', None), args=args)
-            logger.info(f"Model saved to {interrupt_path}")
-            logger.info("Exiting training due to interrupt...")
-            break
         
         # Learning rate scheduling
         if scheduler:
             scheduler.step()
         
         # Save checkpoint
-        if (epoch + 1) % args.save_interval == 0:
+        if vali_loss < start_max_vali_loss:
+            logger.info(f"New best model found at epoch {epoch + 1} with Val Loss: {vali_loss:.7f}.")
             logger.info(f"Saving checkpoint for epoch {epoch + 1}...")
             checkpoint_path = os.path.join(experiment_dir, f'checkpoint_epoch_{epoch + 1}.pt')
             save_checkpoint(model, optimizer, epoch + 1, 
                           {'train_loss': train_loss, 'test_loss': test_loss}, 
                           checkpoint_path, logger, scaler=getattr(args, '_scaler', None), args=args)
-        
-        # TensorBoard logging
-        if writer:
-            writer.add_scalar('Loss/train', train_loss, epoch)
-            writer.add_scalar('Loss/test', test_loss, epoch)
-            writer.add_scalar('LR', optimizer.param_groups[0]['lr'], epoch)
-    
-    # Final save
-    logger.info("Saving final model...")
-    final_path = os.path.join(experiment_dir, 'final_model.pt')
-    save_checkpoint(model, optimizer, args.train_epochs, {}, final_path, logger, 
-                   scaler=getattr(args, '_scaler', None), args=args)
-    
-    if writer:
-        writer.close()
+            start_max_vali_loss = vali_loss
     
     logger.info("Training completed!")
 
+def vali(args, model):
+    device = get_device(args)
+    criterion = nn.HuberLoss(delta=0.1)
+    # Create data loaders
+    test_data, val_loader = data_provider(args, flag='val')
+    logger.info(f"Created data loaders: {len(val_loader)} vals")
+
+    preds = []
+    trues = []
+    total_loss = []
+
+    model.eval()
+    with torch.no_grad():
+        for i, (batch_x, batch_y) in enumerate(val_loader):
+            batch_x = batch_x.float().to(device)
+            batch_y = batch_y.float().to(device)
+
+            # Use inference mode (no teacher forcing)
+            outputs = model.inference(batch_x[:, :args.seq_len, :])
+
+            # Calculate loss
+            f_dim = -1
+            outputs = outputs[:, :, :].to(device)
+            batch_y = batch_y[:, -args.pred_len:, f_dim:].to(device)
+            
+            loss = criterion(outputs, batch_y)
+            
+            # Store predictions and ground truth (normalized for loss calculation)
+            pred = outputs.detach().cpu()
+            true = batch_y.detach().cpu()
+            
+            preds.append(pred)
+            trues.append(true)
+
+            total_loss.append(loss.item())
+            
+    avg_loss = np.average(total_loss)
+
+    model.train()  # Return to training mode
+    return avg_loss
 
 def test(args, peeking=False, model=None, epoch=None):
     """Test the model using inference mode (no teacher forcing)."""
@@ -513,6 +500,7 @@ def test(args, peeking=False, model=None, epoch=None):
 
     # Create data loaders
     test_data, test_loader = data_provider(args, flag='test')
+    logger.info(f"Created data loaders: {len(test_loader)} tests")
 
     preds = []
     trues = []

@@ -22,7 +22,7 @@ class Dataset_Custom(Dataset):
         self.prediction_length = size[1]
 
         # init
-        type_map = {'train': 0, 'test': 1}
+        type_map = {'train': 0, 'test': 1, 'val': 2}
         self.set_type = type_map[flag]
         self.flag = flag
 
