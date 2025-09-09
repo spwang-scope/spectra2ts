@@ -373,9 +373,11 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             # Input: [start_token, target[0], target[1], ..., target[n-2]]
             # Output: [target[0], target[1], target[2], ..., target[n-1]]
             
-            start_tokens = self.start_token.expand(batch_size, 1, self.time_series_dim)
-            # Use target[:-1] (all but last element) to predict target (all elements)
-            decoder_input = torch.cat([start_tokens, target[:, :-1, :]], dim=1)  # (batch_size, pred_len, ts_dim)
+            # Pre-allocate decoder input tensor for efficiency
+            decoder_input = torch.zeros(batch_size, self.prediction_length, self.time_series_dim,
+                                       device=device, dtype=target.dtype)
+            decoder_input[:, 0, :] = self.start_token.squeeze(0).squeeze(0)  # Set start token
+            decoder_input[:, 1:, :] = target[:, :-1, :]  # Set shifted target
             
             # Embed and add positional encoding
             decoder_input = self.value_embedding(decoder_input)  # (batch_size, pred_len, d_model)
@@ -396,35 +398,43 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             # Output directly corresponds to target without shifting
             
         else:
-            # Inference mode: autoregressive generation
-            predictions = []
+            # Inference mode: autoregressive generation with pre-allocated tensors
+            # Pre-allocate output tensor for efficiency
+            output = torch.zeros(batch_size, self.prediction_length, self.time_series_dim,
+                               device=device, dtype=torch.float32)
             
-            # Start with start token
-            current_input = self.start_token.expand(batch_size, 1, self.time_series_dim)
+            # Pre-allocate input sequence tensor (grows from 1 to prediction_length+1)
+            max_seq_len = self.prediction_length + 1
+            input_sequence = torch.zeros(batch_size, max_seq_len, self.time_series_dim,
+                                       device=device, dtype=torch.float32)
+            input_sequence[:, 0, :] = self.start_token.squeeze(0).squeeze(0)  # Set start token
             
             for step in range(self.prediction_length):
+                # Get current sequence length
+                current_seq_len = step + 1
+                current_input = input_sequence[:, :current_seq_len, :]
+                
                 # Embed current sequence
-                embedded = self.value_embedding(current_input)  # (batch_size, step+1, d_model)
+                embedded = self.value_embedding(current_input)  # (batch_size, current_seq_len, d_model)
                 embedded = self.pos_encoding(embedded)
                 
                 # Create causal mask
-                tgt_len = embedded.size(1)
-                tgt_mask = self._generate_square_subsequent_mask(tgt_len, device)
+                tgt_mask = self._generate_square_subsequent_mask(current_seq_len, device)
                 
                 # Pass through decoder layers
-                output = embedded
+                layer_output = embedded
                 for layer in self.decoder_layers:
-                    output = layer(output, memory, tgt_mask=tgt_mask)
+                    layer_output = layer(layer_output, memory, tgt_mask=tgt_mask)
                 
                 # Get prediction for next time step
-                next_pred = self.output_projection(output[:, -1:, :])  # (batch_size, 1, ts_dim)
-                predictions.append(next_pred)
+                next_pred = self.output_projection(layer_output[:, -1:, :])  # (batch_size, 1, ts_dim)
                 
-                # Append prediction to input for next iteration
-                current_input = torch.cat([current_input, next_pred], dim=1)
-            
-            # Concatenate predictions
-            output = torch.cat(predictions, dim=1)  # (batch_size, pred_len, ts_dim)
+                # Store prediction in pre-allocated output tensor
+                output[:, step, :] = next_pred.squeeze(1)
+                
+                # Update input sequence for next iteration (in-place)
+                if step < self.prediction_length - 1:  # Don't update on last iteration
+                    input_sequence[:, step + 1, :] = next_pred.squeeze(1)
         
         return output
 
