@@ -58,7 +58,7 @@ def parse_arguments():
                        help="Length of time series to predict")
     parser.add_argument("--seq_len", type=int, default=96,
                        help="Length of context window")
-    parser.add_argument("--feature_projection_dim", type=int, default=128,
+    parser.add_argument("--feature_projection_dim", type=int, default=256,
                        help="Dimension for QKV vectors in decoder cross-attention")
     parser.add_argument("--time_series_dim", type=int, default=1,
                        help="Dimension of time series (1 for univariate)")
@@ -78,7 +78,7 @@ def parse_arguments():
                        help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
                        help="Learning rate")
-    parser.add_argument("--train_epochs", type=int, default=50,
+    parser.add_argument("--train_epochs", type=int, default=30,
                        help="Number of training epochs")
     parser.add_argument("--weight_decay", type=float, default=1e-5,
                        help="Weight decay for optimizer")
@@ -95,16 +95,10 @@ def parse_arguments():
                        help="Dataset filename")
     parser.add_argument("--num_workers", type=int, default=4,
                        help="Number of data loading workers")
-    parser.add_argument("--augment", action="store_true",
-                       help="Apply data augmentation")
     
     # Experiment arguments
     parser.add_argument("--experiment_name", type=str, default="vit_timeseries",
                        help="Name of the experiment")
-    parser.add_argument("--save_interval", type=int, default=10,
-                       help="Save model every N epochs")
-    parser.add_argument("--eval_interval", type=int, default=5,
-                       help="Evaluate model every N epochs")
     
     # Mode arguments
     parser.add_argument("--mode", type=str, default="train",
@@ -152,12 +146,7 @@ def parse_arguments():
 def get_device(args) -> torch.device:
     """Get the appropriate device."""
     if hasattr(args, 'device') and hasattr(args, 'cuda_num'):
-        #print(f"Setting up device mapping for: {args.cuda_num}")
-        mapper = CUDADeviceMapper()
-        #mapper.print_mapping()  # Show the mapping
-        device = mapper.set_device_from_config(args.cuda_num)
-        args.device = device
-        print(f"Device mapping complete. Using: {device}")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         return device
     else:
         exit("Device error!")
@@ -229,39 +218,6 @@ def load_checkpoint(filepath: str, model: ViTToTimeSeriesModel,
         checkpoint = torch.load(filepath, map_location='cpu')
         model_state = checkpoint['model_state_dict']
         
-        # Check if checkpoint has old fixed positional encoding
-        pos_encoding_keys = [k for k in model_state.keys() if k.startswith('ts_decoder.pos_encoding.')]
-        has_fixed_pe = any('pe' in key for key in pos_encoding_keys)  # Check for 'pe' buffer
-        
-        if has_fixed_pe:
-            # Extract prediction length from checkpoint's positional encoding shape
-            pe_key = 'ts_decoder.pos_encoding.pe'
-            if pe_key in model_state:
-                checkpoint_pe_shape = model_state[pe_key].shape
-                checkpoint_prediction_length = checkpoint_pe_shape[1] - 1  # Subtract 1 for start token
-                
-                if logger:
-                    logger.info(f'Checkpoint has fixed PositionalEncoding with prediction_length: {checkpoint_prediction_length}')
-                    logger.info(f'Checkpoint positional encoding shape: {checkpoint_pe_shape}')
-                    
-                    if current_pos_encoding_type == 'DecoderPositionalEncoding':
-                        logger.info('Current model uses DecoderPositionalEncoding (dynamic)')
-                        if current_prediction_length != checkpoint_prediction_length:
-                            logger.info(f'Prediction length mismatch: current={current_prediction_length}, checkpoint={checkpoint_prediction_length}')
-                            logger.info('Skipping checkpoint positional encoding parameters - using dynamic computation')
-                        else:
-                            logger.info('Prediction lengths match, but still using dynamic encoding for flexibility')
-                    
-                # Remove positional encoding parameters from checkpoint for dynamic replacement
-                for key in pos_encoding_keys:
-                    if 'pe' in key:  # Only remove the 'pe' buffer, keep other params like dropout
-                        del model_state[key]
-                        if logger:
-                            logger.info(f'Removed checkpoint parameter: {key}')
-        else:
-            if logger:
-                logger.info('Checkpoint already uses dynamic positional encoding')
-        
         # Load the model state dict (strict=False only for positional encoding buffer)
         missing_keys, unexpected_keys = model.load_state_dict(model_state, strict=False)
         
@@ -302,6 +258,12 @@ def train(args):
     # Create data loaders
     train_dataset, train_loader = data_provider(args, flag='train')
     logger.info(f"Created data loaders: {len(train_loader)} trains")
+    # Create data loaders
+    test_data, test_loader = data_provider(args, flag='test')
+    logger.info(f"Created data loaders: {len(test_loader)} tests")
+    # Create data loaders
+    vali_data, val_loader = data_provider(args, flag='val')
+    logger.info(f"Created data loaders: {len(val_loader)} vals")
     
     # Create model
     logger.info("Creating ViT-to-TimeSeries model with Transformer decoder...")
@@ -319,7 +281,7 @@ def train(args):
     ).to(device)
     logger.info("Model created successfully")
 
-    logger.info(f"Model architecture: {model}")
+    #logger.info(f"Model architecture: {model}")
     logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
     # Apply freezing if requested
@@ -336,7 +298,7 @@ def train(args):
     # Create optimizer and scheduler
     logger.info("Creating optimizer and scheduler...")
     optimizer, scheduler = create_optimizer_and_scheduler(model, args)
-    criterion = nn.HuberLoss(delta=0.1)  
+    criterion = nn.MSELoss() 
     
     # Training loop
     start_epoch = 0
@@ -398,8 +360,8 @@ def train(args):
         train_loss = np.average(train_loss)
         
         # Evaluate on test set
-        test_loss = test(args, peeking=True, model=model, epoch=epoch)
-        vali_loss = vali(args, model=model)
+        test_loss = test(args, peeking=True, model=model, epoch=epoch, test_loader=test_loader)
+        vali_loss = vali(args, model=model, val_loader=val_loader)
         
         logger.info(f"Epoch: {epoch + 1} | Train Loss: {train_loss:.7f} Val Loss: {vali_loss:.7f} Test Loss: {test_loss:.7f} ")
         
@@ -412,20 +374,18 @@ def train(args):
         if vali_loss < start_max_vali_loss:
             logger.info(f"New best model found at epoch {epoch + 1} with Val Loss: {vali_loss:.7f}.")
             logger.info(f"Saving checkpoint for epoch {epoch + 1}...")
-            checkpoint_path = os.path.join(experiment_dir, f'checkpoint_epoch_{epoch + 1}.pt')
+            checkpoint_path = os.path.join(experiment_dir, f'checkpoint_best.pt')
             save_checkpoint(model, optimizer, epoch + 1, 
                           {'train_loss': train_loss, 'test_loss': test_loss}, 
-                          checkpoint_path, logger, scaler=getattr(args, '_scaler', None), args=args)
+                          checkpoint_path, logger, scaler=args._scaler, args=args)
+            args.checkpoint_path = checkpoint_path
             start_max_vali_loss = vali_loss
     
     logger.info("Training completed!")
 
-def vali(args, model):
+def vali(args, model, val_loader):
     device = get_device(args)
     criterion = nn.MSELoss()
-    # Create data loaders
-    vali_data, val_loader = data_provider(args, flag='val')
-    logger.info(f"Created data loaders: {len(val_loader)} vals")
 
     preds = []
     trues = []
@@ -461,12 +421,12 @@ def vali(args, model):
     model.train()  # Return to training mode
     return avg_loss
 
-def test(args, peeking=False, model=None, epoch=None):
+def test(args, peeking=False, model=None, epoch=None, test_loader=None):
     """Test the model using inference mode (no teacher forcing)."""
     
     device = get_device(args)
     
-    if not args.checkpoint_path and not peeking:
+    if not args.checkpoint_path and not peeking and not model:
         raise ValueError("checkpoint_path must be specified for testing")
     
     # Create and load model
@@ -484,23 +444,30 @@ def test(args, peeking=False, model=None, epoch=None):
             ts_dim_feedforward=args.d_ff,
             ts_dropout=args.dropout,
         ).to(device)
-        logger.info("Model created successfully") 
         _, scaler = load_checkpoint(args.checkpoint_path, model, logger=logger)
+        logger.info("Model created successfully") 
         
         # Set scaler for proper data normalization and denormalization
         if scaler is not None:
             args._scaler = scaler
+            assert args._scaler is not None,  "scaler is not loaded correctly!"
             logger.info("Scaler loaded and set for TSLib standard testing")
         else:
             logger.warning("No scaler found in checkpoint - this will cause incorrect results!")
+
+        if test_loader is None:
+        # Create data loader
+            test_data, test_loader = data_provider(args, flag='test')
+            logger.info(f"replaced test loader scaler with loaded scaler")
+            logger.info(f"Created data loader: {len(test_loader)} tests")
+        
+        
         
         logger.info("Model weights loaded successfully") 
     else:
         assert(model is not None)
 
-    # Create data loaders
-    test_data, test_loader = data_provider(args, flag='test')
-    logger.info(f"Created data loaders: {len(test_loader)} tests")
+    
 
     preds = []
     trues = []
@@ -566,12 +533,12 @@ def test(args, peeking=False, model=None, epoch=None):
                 pd = np.concatenate((input_np[0, :args.seq_len, -1], pred[0, :, -1].numpy()), axis=0)
             
             # Generate visualization
-            if peeking:
-                if (i % 20 == 0 and (epoch + 1) % 10 == 0):
-                    visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch + 1}.png'))
-            else:
-                if (i % 10 == 0):
-                    visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}.png'))
+            #if peeking:
+            #    if (i % 20 == 0 and (epoch + 1) % 10 == 0):
+            #        visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}_epoch{epoch + 1}.png'))
+            #else:
+            #    if (i % 10 == 0):
+            #        visual(gt, pd, os.path.join(args.output_dir, f'test_vis_{i}.png'))
 
             total_loss.append(loss.item())
             
@@ -589,9 +556,9 @@ def test(args, peeking=False, model=None, epoch=None):
     #preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
     #trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
 
-    print(f"Preds: {preds.shape}, Trues: {trues.shape}")
-    print(f"Pred range: {preds.min():.6f} to {preds.max():.6f}")
-    print(f"True range: {trues.min():.6f} to {trues.max():.6f}")
+    logger.info(f"Preds: {preds.shape}, Trues: {trues.shape}")
+    logger.info(f"Pred range: {preds.min():.6f} to {preds.max():.6f}")
+    logger.info(f"True range: {trues.min():.6f} to {trues.max():.6f}")
 
     
 
@@ -783,6 +750,7 @@ def main():
     
     if args.mode == "train":
         train(args)
+        test(args)
     elif args.mode == "test":
         test(args)
     elif args.mode == "inference":
