@@ -60,7 +60,7 @@ def parse_arguments():
                        help="Length of context window")
     parser.add_argument("--feature_projection_dim", type=int, default=256,
                        help="Dimension for QKV vectors in decoder cross-attention")
-    parser.add_argument("--time_series_dim", type=int, default=1,
+    parser.add_argument("--pred_dim", type=int, default=1,
                        help="Dimension of time series (1 for univariate)")
     parser.add_argument("--d_model", type=int, default=768,
                        help="Hidden dimension for transformer decoder")
@@ -272,7 +272,7 @@ def train(args):
         prediction_length=args.pred_len,
         context_length=args.seq_len,
         feature_projection_dim=args.feature_projection_dim,
-        time_series_dim=args.time_series_dim,
+        pred_dim=args.pred_dim,
         ts_model_dim=args.d_model,
         ts_num_heads=args.n_heads,
         ts_num_layers=args.d_layers,
@@ -329,11 +329,11 @@ def train(args):
             # Forward pass with teacher forcing (training mode)
             outputs = model(context=batch_x, tf_target=batch_y, mode='train')
 
-            # Select target feature for loss calculation based on time_series_dim
+            # Select target feature for loss calculation based on pred_dim
             outputs = outputs[:, :, :].to(device)
-            if hasattr(args, 'time_series_dim') and args.time_series_dim > 1:
-                # Multi-variable prediction: use last time_series_dim features
-                batch_y = batch_y[:, :args.pred_len, -args.time_series_dim:].to(device)
+            if hasattr(args, 'pred_dim') and args.pred_dim > 1:
+                # Multi-variable prediction: use last pred_dim features
+                batch_y = batch_y[:, :args.pred_len, -args.pred_dim:].to(device)
             else:
                 # Single variable prediction: use last feature only
                 batch_y = batch_y[:, :args.pred_len, -1:].to(device)
@@ -437,7 +437,7 @@ def test(args, peeking=False, model=None, epoch=None, test_loader=None):
             prediction_length=args.pred_len,
             context_length=args.seq_len,
             feature_projection_dim=args.feature_projection_dim,
-            time_series_dim=args.time_series_dim,
+            pred_dim=args.pred_dim,
             ts_model_dim=args.d_model,
             ts_num_heads=args.n_heads,
             ts_num_layers=args.d_layers,
@@ -630,7 +630,7 @@ def inference(args):
         prediction_length=args.pred_len,
         context_length=args.seq_len,
         feature_projection_dim=args.feature_projection_dim,
-        time_series_dim=args.time_series_dim,
+        pred_dim=args.pred_dim,
         ts_model_dim=args.d_model,
         ts_num_heads=args.n_heads,
         ts_num_layers=args.d_layers,

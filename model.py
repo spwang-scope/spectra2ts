@@ -23,9 +23,23 @@ from pytorch_stft import get_STFT_spectra  # Importing the STFT function from py
 import numpy as np
 import matplotlib.pyplot as plt
 
+class ValueEmbedding(nn.Module):
+    def __init__(self, c_in, d_model):
+        super(ValueEmbedding, self).__init__()
+        padding = 1 if torch.__version__ >= '1.5.0' else 2
+        self.tokenConv = nn.Conv1d(in_channels=c_in, out_channels=d_model,
+                                   kernel_size=3, padding=padding, padding_mode='circular', bias=False)
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(
+                    m.weight, mode='fan_in', nonlinearity='leaky_relu')
+
+    def forward(self, x):
+        x = self.tokenConv(x.permute(0, 2, 1)).transpose(1, 2)
+        return x
 
 
-class PositionalEncoding(nn.Module):
+class PositionalEmbedding(nn.Module):
     """Positional encoding for transformer."""
     
     def __init__(self, d_model: int, max_len: int = 1000, dropout: float = 0.1):
@@ -52,11 +66,11 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 '''
-class DecoderPositionalEncoding(nn.Module):
+class DecoderPositionalEmbedding(nn.Module):
     """
     Dynamic positional encoding for transformer decoder that computes encodings on-the-fly.
     Allows for variable prediction lengths without fixed buffer size limitations.
-    Maintains backward compatibility with checkpoints trained using fixed PositionalEncoding.
+    Maintains backward compatibility with checkpoints trained using fixed PositionalEmbedding.
     """
     
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 10000):
@@ -118,6 +132,97 @@ class DecoderPositionalEncoding(nn.Module):
         self._pe_cache.clear()
 '''
 
+class CachedMultiHeadAttention(nn.Module):
+    """
+    MultiHead Attention with KV caching support for autoregressive generation.
+    """
+    
+    def __init__(self, d_model: int, nhead: int, dropout: float = 0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.nhead = nhead
+        self.head_dim = d_model // nhead
+        assert d_model % nhead == 0, "d_model must be divisible by nhead"
+        
+        # Linear projections
+        self.q_linear = nn.Linear(d_model, d_model)
+        self.k_linear = nn.Linear(d_model, d_model)
+        self.v_linear = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.scale = self.head_dim ** -0.5
+    
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        use_cache: bool = False,
+        cache: Optional[Dict[str, torch.Tensor]] = None
+    ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
+        """
+        Args:
+            query: (batch_size, tgt_len, d_model)
+            key: (batch_size, src_len, d_model) 
+            value: (batch_size, src_len, d_model)
+            attn_mask: (tgt_len, src_len) or None
+            use_cache: Whether to use/update cache
+            cache: Dict with 'k' and 'v' tensors for caching
+            
+        Returns:
+            output: (batch_size, tgt_len, d_model)
+            updated_cache: Updated cache dict if use_cache=True
+        """
+        batch_size, tgt_len, _ = query.shape
+        
+        # Apply linear projections
+        Q = self.q_linear(query)  # (batch, tgt_len, d_model)
+        K = self.k_linear(key)    # (batch, src_len, d_model) 
+        V = self.v_linear(value)  # (batch, src_len, d_model)
+        
+        # Handle KV caching
+        updated_cache = None
+        if use_cache:
+            if cache is not None and 'k' in cache and 'v' in cache:
+                # Concatenate new K,V with cached K,V
+                K = torch.cat([cache['k'], K], dim=1)  # (batch, cached_len + src_len, d_model)
+                V = torch.cat([cache['v'], V], dim=1)  # (batch, cached_len + src_len, d_model)
+            
+            # Update cache with new K,V
+            updated_cache = {'k': K.clone(), 'v': V.clone()}
+        
+        src_len = K.size(1)
+        
+        # Reshape for multi-head attention
+        Q = Q.view(batch_size, tgt_len, self.nhead, self.head_dim).transpose(1, 2)  # (batch, nhead, tgt_len, head_dim)
+        K = K.view(batch_size, src_len, self.nhead, self.head_dim).transpose(1, 2)  # (batch, nhead, src_len, head_dim)
+        V = V.view(batch_size, src_len, self.nhead, self.head_dim).transpose(1, 2)  # (batch, nhead, src_len, head_dim)
+        
+        # Compute attention scores
+        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # (batch, nhead, tgt_len, src_len)
+        
+        # Apply attention mask
+        if attn_mask is not None:
+            if attn_mask.dim() == 2:  # (tgt_len, src_len)
+                attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)  # (1, 1, tgt_len, src_len)
+            attn_scores = attn_scores + attn_mask
+        
+        # Apply softmax
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, V)  # (batch, nhead, tgt_len, head_dim)
+        
+        # Reshape and project output
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, tgt_len, self.d_model)
+        output = self.out_proj(attn_output)
+        
+        return output, updated_cache
+
+
 class TransformerDecoderLayer(nn.Module):
     """
     Custom transformer decoder layer with self-attention and cross-attention.
@@ -133,13 +238,13 @@ class TransformerDecoderLayer(nn.Module):
     ):
         super().__init__()
         
-        # Self-attention
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        # Self-attention with caching support
+        self.self_attn = CachedMultiHeadAttention(d_model, nhead, dropout)
         self.norm1 = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(dropout)
         
-        # Cross-attention
-        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        # Cross-attention with caching support
+        self.cross_attn = CachedMultiHeadAttention(d_model, nhead, dropout)
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout2 = nn.Dropout(dropout)
         
@@ -158,24 +263,42 @@ class TransformerDecoderLayer(nn.Module):
         tgt: torch.Tensor,
         memory: torch.Tensor,
         tgt_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        use_cache: bool = False,
+        self_attn_cache: Optional[Dict[str, torch.Tensor]] = None,
+        cross_attn_cache: Optional[Dict[str, torch.Tensor]] = None
+    ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]], Optional[Dict[str, torch.Tensor]]]:
         """
         Args:
             tgt: Target sequence from decoder (batch_size, tgt_len, d_model)
             memory: Encoder output (batch_size, src_len, d_model)
             tgt_mask: Causal mask for target sequence
+            use_cache: Whether to use KV caching
+            self_attn_cache: Cache for self-attention
+            cross_attn_cache: Cache for cross-attention
             
         Returns:
-            Output tensor (batch_size, tgt_len, d_model)
+            output: Output tensor (batch_size, tgt_len, d_model)
+            updated_self_cache: Updated self-attention cache
+            updated_cross_cache: Updated cross-attention cache
         """
         # Self-attention with residual connection
-        tgt2 = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask)[0]
+        tgt2, updated_self_cache = self.self_attn(
+            query=tgt, key=tgt, value=tgt, 
+            attn_mask=tgt_mask, 
+            use_cache=use_cache, 
+            cache=self_attn_cache
+        )
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
         
         # Cross-attention with residual connection
         # Q from decoder (tgt), K and V from encoder (memory)
-        tgt2 = self.cross_attn(tgt, memory, memory)[0]
+        tgt2, updated_cross_cache = self.cross_attn(
+            query=tgt, key=memory, value=memory, 
+            attn_mask=None,  # No mask for cross-attention
+            use_cache=use_cache,
+            cache=cross_attn_cache
+        )
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
         
@@ -184,7 +307,7 @@ class TransformerDecoderLayer(nn.Module):
         tgt = tgt + self.dropout3(tgt2)
         tgt = self.norm3(tgt)
         
-        return tgt
+        return tgt, updated_self_cache, updated_cross_cache
 
 class TransformerDecoderWithCrossAttention(nn.Module):
     """
@@ -204,7 +327,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         dropout: float = 0.1,
         prediction_length: int = 96,
         context_length: int = 96,
-        time_series_dim: int = 1,
+        pred_dim: int = 1,
         encoder_dim: int = 768,  # ViT encoder output dimension
     ):
         super().__init__()
@@ -212,19 +335,22 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         self.d_model = d_model
         self.prediction_length = prediction_length
         self.context_length = context_length
-        self.time_series_dim = time_series_dim
+        self.pred_dim = pred_dim
         
         # Embedding for time series values
-        self.value_embedding = nn.Linear(time_series_dim, d_model)
+        self.value_embedding = nn.Linear(pred_dim, d_model)
         
         # Dynamic positional encoding for variable prediction lengths
-        self.pos_encoding = PositionalEncoding(d_model, dropout=dropout)
+        self.pos_encoding = PositionalEmbedding(d_model, dropout=dropout)
         
         # Project encoder output to decoder dimension for cross-attention
         self.encoder_projection = nn.Linear(encoder_dim, d_model)
         
         # Project context condition (last feature of context) to decoder dimension
         self.context_condition_projection = nn.Linear(context_length, d_model)
+        
+        # Project encoder CLS token to time series start token
+        self.start_token_projection = nn.Linear(encoder_dim, pred_dim)
         
         # Custom transformer decoder layers with cross-attention
         self.decoder_layers = nn.ModuleList([
@@ -243,12 +369,13 @@ class TransformerDecoderWithCrossAttention(nn.Module):
             nn.Linear(d_model, d_model // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, time_series_dim)
+            nn.Linear(d_model // 2, pred_dim)
         )
         
-        
-        # Learnable start token
-        self.start_token = nn.Parameter(torch.randn(1, 1, time_series_dim))
+        # Static cross-attention memory and cache buffers
+        self.static_cross_kv = None
+        self.cross_attn_cache = None  # Static + dynamic K,V for cross-attention
+        self.self_attn_cache = None   # Dynamic K,V for self-attention
         
         # Initialize parameters with better initialization schemes
         self._initialize_parameters()
@@ -257,9 +384,6 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         """
         Initialize decoder parameters with better schemes for gradient sensitivity.
         """
-        # Initialize start token with small values close to expected range
-        nn.init.normal_(self.start_token, mean=0.0, std=0.02)
-        
         # Initialize value embedding layer
         nn.init.xavier_uniform_(self.value_embedding.weight)
         nn.init.constant_(self.value_embedding.bias, 0.0)
@@ -267,6 +391,10 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         # Initialize encoder projection
         nn.init.xavier_uniform_(self.encoder_projection.weight)
         nn.init.constant_(self.encoder_projection.bias, 0.0)
+        
+        # Initialize start token projection
+        nn.init.xavier_uniform_(self.start_token_projection.weight)
+        nn.init.constant_(self.start_token_projection.bias, 0.0)
         
         # Initialize transformer decoder layers with scaled initialization
         for layer in self.decoder_layers:
@@ -336,6 +464,53 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         mask = mask.masked_fill(mask == 1, float('-inf'))
         return mask
     
+    def setup_encoder_memory(self, encoder_output: torch.Tensor, context_condition: torch.Tensor):
+        """
+        Pre-compute static cross-attention K,V from encoder output.
+        This should be called once before teacher forcing or inference.
+        
+        Args:
+            encoder_output: Output from ViT encoder (batch_size, num_patches+1, encoder_dim)
+            context_condition: Last feature column of context (batch_size, context_length)
+        """
+        # Project encoder output to decoder dimension  
+        static_memory = self.encoder_projection(encoder_output)  # (batch, num_patches+1, d_model)
+        
+        # Project context condition
+        context_vec = self.context_condition_projection(context_condition)  # (batch, d_model)
+        context_vec = context_vec.unsqueeze(1)  # (batch, 1, d_model)
+        
+        # Combine static memory for cross-attention
+        self.static_cross_kv = torch.cat([static_memory, context_vec], dim=1)  # (batch, num_patches+2, d_model)
+    
+    def get_start_token(self, encoder_output: torch.Tensor) -> torch.Tensor:
+        """
+        Project encoder CLS token to time series start token.
+        
+        Args:
+            encoder_output: Output from ViT encoder (batch_size, num_patches+1, encoder_dim)
+            
+        Returns:
+            Start token tensor (batch_size, 1, pred_dim)
+        """
+        cls_token = encoder_output[:, -1, -self.pred_dim:]  # (batch, encoder_dim) - CLS token is last
+        start_token = self.start_token_projection(cls_token)  # (batch, pred_dim)
+        return start_token.unsqueeze(1)  # (batch, 1, pred_dim)
+    
+    def clear_dynamic_cache(self):
+        """
+        Clear prediction parts of cache, keep encoder parts.
+        Should be called after inference to reset cache for next sequence.
+        """
+        if self.static_cross_kv is not None and self.cross_attn_cache is not None:
+            # Keep static part (encoder + context), clear dynamic part
+            static_size = self.static_cross_kv.size(1)  # num_patches + 2
+            if self.cross_attn_cache.size(1) > static_size:
+                self.cross_attn_cache = self.static_cross_kv.clone()  # Reset to static only
+        
+        # Clear self-attention cache completely
+        self.self_attn_cache = None
+    
     def forward(
         self, 
         encoder_output: torch.Tensor,
@@ -344,97 +519,118 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         use_teacher_forcing: bool = True
     ) -> torch.Tensor:
         """
-        Forward pass with optional teacher forcing.
+        Forward pass with KV caching support.
         
         Args:
             encoder_output: Output from ViT encoder (batch_size, num_patches+1, encoder_dim)
             context_condition: Last feature column of context (batch_size, context_length)
-            target: Ground truth for teacher forcing (batch_size, prediction_length, time_series_dim)
+            target: Ground truth for teacher forcing (batch_size, prediction_length, pred_dim)
             use_teacher_forcing: Whether to use teacher forcing (True during training)
             
         Returns:
-            Predictions (batch_size, prediction_length, time_series_dim)
+            Predictions (batch_size, prediction_length, pred_dim)
         """
+        # Setup static encoder memory once
+        self.setup_encoder_memory(encoder_output, context_condition)
+        
+        if use_teacher_forcing and target is not None:
+            return self._forward_teacher_forcing(encoder_output, target)
+        else:
+            return self._forward_inference(encoder_output)
+    
+    def _forward_teacher_forcing(self, encoder_output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Teacher forcing forward pass with static memory and causal mask."""
         batch_size = encoder_output.size(0)
         device = encoder_output.device
         
-        # Project encoder output for cross-attention K, V
-        memory = self.encoder_projection(encoder_output)  # (batch_size, num_patches+1, d_model)
+        # Get start token from encoder CLS token
+        start_token = self.get_start_token(encoder_output)  # (batch, 1, pred_dim)
         
-        # Project context condition and add to memory as additional context
-        context_vec = self.context_condition_projection(context_condition)  # (batch_size, d_model)
-        context_vec = context_vec.unsqueeze(1)  # (batch_size, 1, d_model)
+        # Pre-allocate decoder input tensor for efficiency
+        decoder_input = torch.zeros(batch_size, self.prediction_length, self.pred_dim,
+                                   device=device, dtype=target.dtype)
+        decoder_input[:, 0, :] = start_token.squeeze(1)  # Set start token
+        decoder_input[:, 1:, :] = target[:, :-1, :]  # Set shifted target
         
-        # Combine encoder output with context condition for cross-attention
-        memory = torch.cat([memory, context_vec], dim=1)  # (batch_size, num_patches+2, d_model)
+        # Embed and add positional encoding
+        decoder_input = self.value_embedding(decoder_input)  # (batch_size, pred_len, d_model)
+        decoder_input = self.pos_encoding(decoder_input)
         
-        if use_teacher_forcing and target is not None:
-            # Teacher forcing: use ground truth as input, properly aligned for prediction
-            # Input: [start_token, target[0], target[1], ..., target[n-2]]
-            # Output: [target[0], target[1], target[2], ..., target[n-1]]
+        # Create causal mask
+        tgt_len = decoder_input.size(1)
+        tgt_mask = self._generate_square_subsequent_mask(tgt_len, device)
+        
+        # Pass through decoder layers with static memory (no caching)
+        output = decoder_input
+        for layer in self.decoder_layers:
+            output, _, _ = layer(
+                tgt=output, 
+                memory=self.static_cross_kv, 
+                tgt_mask=tgt_mask,
+                use_cache=False,  # No caching during teacher forcing
+                self_attn_cache=None,
+                cross_attn_cache=None
+            )
+        
+        # Project to output dimension
+        output = self.output_projection(output)  # (batch_size, pred_len, pred_dim)
+        return output
+    
+    def _forward_inference(self, encoder_output: torch.Tensor) -> torch.Tensor:
+        """Inference forward pass with KV caching."""
+        batch_size = encoder_output.size(0)
+        device = encoder_output.device
+        
+        # Get start token from encoder CLS token
+        start_token = self.get_start_token(encoder_output)  # (batch, 1, pred_dim)
+        
+        # Initialize caches with static memory
+        self.cross_attn_cache = self.static_cross_kv.clone()  # Start with static memory
+        self.self_attn_cache = None  # Will be initialized on first use
+        
+        # Pre-allocate output tensor
+        output = torch.zeros(batch_size, self.prediction_length, self.pred_dim,
+                           device=device, dtype=torch.float32)
+        
+        # Initialize current input with start token
+        current_input = start_token  # (batch, 1, pred_dim)
+        
+        for step in range(self.prediction_length):
+            # Embed current input (just the latest token)
+            embedded = self.value_embedding(current_input)  # (batch, 1, d_model)
+            embedded = self.pos_encoding(embedded)
             
-            # Pre-allocate decoder input tensor for efficiency
-            decoder_input = torch.zeros(batch_size, self.prediction_length, self.time_series_dim,
-                                       device=device, dtype=target.dtype)
-            decoder_input[:, 0, :] = self.start_token.squeeze(0).squeeze(0)  # Set start token
-            decoder_input[:, 1:, :] = target[:, :-1, :]  # Set shifted target
+            # Pass through decoder layers with caching
+            layer_output = embedded
+            layer_self_cache = self.self_attn_cache
+            layer_cross_cache = self.cross_attn_cache
             
-            # Embed and add positional encoding
-            decoder_input = self.value_embedding(decoder_input)  # (batch_size, pred_len, d_model)
-            decoder_input = self.pos_encoding(decoder_input)
-            
-            # Create causal mask
-            tgt_len = decoder_input.size(1)
-            tgt_mask = self._generate_square_subsequent_mask(tgt_len, device)
-            
-            # Pass through decoder layers
-            output = decoder_input
-            for layer in self.decoder_layers:
-                output = layer(output, memory, tgt_mask=tgt_mask)
-            
-            # Project to output dimension - now directly predicts target
-            output = self.output_projection(output)  # (batch_size, pred_len, ts_dim)
-            
-            # Output directly corresponds to target without shifting
-            
-        else:
-            # Inference mode: autoregressive generation with pre-allocated tensors
-            # Pre-allocate output tensor for efficiency
-            output = torch.zeros(batch_size, self.prediction_length, self.time_series_dim,
-                               device=device, dtype=torch.float32)
-            
-            # Pre-allocate input sequence tensor (grows from 1 to prediction_length+1)
-            max_seq_len = self.prediction_length + 1
-            input_sequence = torch.zeros(batch_size, max_seq_len, self.time_series_dim,
-                                       device=device, dtype=torch.float32)
-            input_sequence[:, 0, :] = self.start_token.squeeze(0).squeeze(0)  # Set start token
-            
-            for step in range(self.prediction_length):
-                # Get current sequence length
-                current_seq_len = step + 1
-                current_input = input_sequence[:, :current_seq_len, :]
+            for layer_idx, layer in enumerate(self.decoder_layers):
+                layer_output, updated_self_cache, updated_cross_cache = layer(
+                    tgt=layer_output, 
+                    memory=current_input,  # For cross-attention K,V (new prediction)
+                    tgt_mask=None,  # No mask needed for single token
+                    use_cache=True,
+                    self_attn_cache=layer_self_cache,
+                    cross_attn_cache=layer_cross_cache
+                )
                 
-                # Embed current sequence
-                embedded = self.value_embedding(current_input)  # (batch_size, current_seq_len, d_model)
-                embedded = self.pos_encoding(embedded)
-                
-                # Create causal mask
-                tgt_mask = self._generate_square_subsequent_mask(current_seq_len, device)
-                
-                # Pass through decoder layers
-                layer_output = embedded
-                for layer in self.decoder_layers:
-                    layer_output = layer(layer_output, memory, tgt_mask=tgt_mask)
-                
-                # Get prediction for next time step
-                next_pred = self.output_projection(layer_output[:, -1:, :])  # (batch_size, 1, ts_dim)
-                
-                # Store prediction in pre-allocated output tensor
-                output[:, step, :] = next_pred.squeeze(1)
-                
-                # Update input sequence for next iteration (in-place)
-                if step < self.prediction_length - 1:  # Don't update on last iteration
-                    input_sequence[:, step + 1, :] = next_pred.squeeze(1)
+                # Update caches (each layer shares the same cache structure)
+                if layer_idx == 0:  # Only update on first layer to avoid redundant updates
+                    self.self_attn_cache = updated_self_cache
+                    self.cross_attn_cache = updated_cross_cache
+            
+            # Get prediction for current step
+            next_pred = self.output_projection(layer_output)  # (batch, 1, pred_dim)
+            
+            # Store prediction in output tensor
+            output[:, step, :] = next_pred.squeeze(1)
+            
+            # Update current_input for next iteration
+            current_input = next_pred  # Next iteration will process this prediction
+        
+        # Clear dynamic cache after inference
+        self.clear_dynamic_cache()
         
         return output
 
@@ -453,8 +649,8 @@ class ViTToTimeSeriesModel(nn.Module):
         prediction_length: int = 96,
         context_length: int = 96,
         feature_projection_dim: int = 128,
-        time_series_dim: int = 1,
-        ts_model_dim: int = 64,
+        pred_dim: int = 1,
+        d_model: int = 64,
         ts_num_heads: int = 8,
         ts_num_layers: int = 4,
         ts_dim_feedforward: int = 1024,
@@ -468,8 +664,8 @@ class ViTToTimeSeriesModel(nn.Module):
             prediction_length: Length of time series to predict
             context_length: Length of context window
             feature_projection_dim: Dimension for feature projection
-            time_series_dim: Dimension of time series (usually 1 for univariate)
-            ts_model_dim: Hidden dimension for transformer decoder
+            pred_dim: Dimension of time series (usually 1 for univariate)
+            d_model: Hidden dimension for transformer decoder
             ts_num_heads: Number of attention heads
             ts_num_layers: Number of decoder layers
             ts_dim_feedforward: Feed-forward dimension
@@ -482,10 +678,14 @@ class ViTToTimeSeriesModel(nn.Module):
         # Store configuration
         self.prediction_length = prediction_length
         self.context_length = context_length
-        self.time_series_dim = time_series_dim
+        self.pred_dim = pred_dim
         self.feature_projection_dim = feature_projection_dim
-        self.ts_model_dim = ts_model_dim
+        self.d_model = d_model
         self.num_channels = num_channels
+        self.context_proj_dim = 32
+
+        self.value_embedding = ValueEmbedding(num_channels, self.context_proj_dim)
+        self.position_embedding = PositionalEmbedding(self.context_proj_dim, dropout=ts_dropout)
         
         
         # Rectangular ViT Encoder (128x128 spectrograms)
@@ -507,14 +707,14 @@ class ViTToTimeSeriesModel(nn.Module):
         
         # Transformer Decoder with Cross-Attention
         self.ts_decoder = TransformerDecoderWithCrossAttention(
-            d_model=ts_model_dim,
+            d_model=d_model,
             nhead=ts_num_heads,
             num_layers=ts_num_layers,
             dim_feedforward=ts_dim_feedforward,
             dropout=ts_dropout,
             prediction_length=prediction_length,
             context_length=context_length,
-            time_series_dim=time_series_dim,
+            pred_dim=pred_dim,
             encoder_dim=feature_projection_dim,  # After linear projection
         )
         
@@ -534,6 +734,9 @@ class ViTToTimeSeriesModel(nn.Module):
         """
         device = next(self.parameters()).device
         batch_size = context.size(0)
+
+        context = self.value_embedding(context)  # (batch, context_len, context_proj_dim)
+        context = self.position_embedding(context)  # (batch, context_len, context_proj_dim)
         
         # Step 1: Get last feature column of context as condition (already normalized by StandardScaler)
         context_condition = context[:, :, -1]  # (batch, context_len)
@@ -557,12 +760,12 @@ class ViTToTimeSeriesModel(nn.Module):
             if tf_target is not None:
                 # Target already normalized by StandardScaler
                 # CRITICAL: Select target feature for univariate prediction
-                if self.time_series_dim == 1:
+                if self.pred_dim == 1:
                     # Single variable: use last feature only
                     target_features = tf_target[:, :, -1:]  # (batch, pred_len, 1)
                 else:
-                    # Multi-variable: use last time_series_dim features
-                    target_features = tf_target[:, :, -self.time_series_dim:]  # (batch, pred_len, time_series_dim)
+                    # Multi-variable: use last pred_dim features
+                    target_features = tf_target[:, :, -self.pred_dim:]  # (batch, pred_len, pred_dim)
             else:
                 raise ValueError("tf_target must be provided in training mode")
             
@@ -592,7 +795,7 @@ class ViTToTimeSeriesModel(nn.Module):
             context: Input context time series (batch_size, context_length, features)
             
         Returns:
-            Predicted time series (batch_size, prediction_length, time_series_dim)
+            Predicted time series (batch_size, prediction_length, pred_dim)
         """
         return self.forward(context=context, tf_target=None, mode='inference')
     
