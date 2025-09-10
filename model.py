@@ -735,8 +735,11 @@ class ViTToTimeSeriesModel(nn.Module):
         device = next(self.parameters()).device
         batch_size = context.size(0)
 
+        print('context shape:', context.shape)
         context = self.value_embedding(context)  # (batch, context_len, context_proj_dim)
+        print('context shape:', context.shape)
         context = self.position_embedding(context)  # (batch, context_len, context_proj_dim)
+        print('context shape:', context.shape)
         
         # Step 1: Get last feature column of context as condition (already normalized by StandardScaler)
         context_condition = context[:, :, -1]  # (batch, context_len)
