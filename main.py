@@ -138,7 +138,7 @@ def parse_arguments():
         return df.shape[1]-1  # number of columns, exclude Datetime
     
     # Determine number of data channels since we want to construct model according to it
-    args.num_channels = get_df_channel()
+    args.seq_dim = get_df_channel()
     
     return args
 
@@ -268,7 +268,7 @@ def train(args):
     # Create model
     logger.info("Creating ViT-to-TimeSeries model with Transformer decoder...")
     model = create_model(
-        num_channels=args.num_channels,
+        seq_dim=args.seq_dim,
         prediction_length=args.pred_len,
         context_length=args.seq_len,
         feature_projection_dim=args.feature_projection_dim,
@@ -433,7 +433,7 @@ def test(args, peeking=False, model=None, epoch=None, test_loader=None):
     if not peeking:
         logger.info("Creating model for testing...")
         model = create_model(
-            num_channels=args.num_channels,
+            seq_dim=args.seq_dim,
             prediction_length=args.pred_len,
             context_length=args.seq_len,
             feature_projection_dim=args.feature_projection_dim,
@@ -626,7 +626,7 @@ def inference(args):
     # Create model
     logger.info("Creating model for inference...")
     model = create_model(
-        num_channels=args.num_channels,
+        seq_dim=args.seq_dim,
         prediction_length=args.pred_len,
         context_length=args.seq_len,
         feature_projection_dim=args.feature_projection_dim,

@@ -303,19 +303,13 @@ def create_rectangular_vit(image_height=128, image_width=128, **kwargs):
     Returns:
         RectangularViT model
     """
-    # Optimize patch size based on image width
-    if image_width in [96, 192]:
-        patch_size = 8
-    elif image_width in [336]:
-        patch_size = 8  # Could also use 12 for fewer patches
-    elif image_width in [720]:
-        patch_size = 16  # Larger patches for very wide images
-    else:
-        patch_size = 8  # Default
+    patch_size = 8  # Default
+    in_channels = 1  # Our spectrograms are single-channel
         
     return RectangularViT(
         image_height=image_height,
         image_width=image_width,
         patch_size=patch_size,
+        in_channels=in_channels,
         **kwargs
     )

@@ -645,7 +645,7 @@ class ViTToTimeSeriesModel(nn.Module):
     
     def __init__(
         self,
-        num_channels: int = 1,
+        seq_dim: int = 1,
         prediction_length: int = 96,
         context_length: int = 96,
         feature_projection_dim: int = 128,
@@ -660,7 +660,7 @@ class ViTToTimeSeriesModel(nn.Module):
         Initialize the model.
         
         Args:
-            num_channels: Number of channels in spectrogram
+            seq_dim: Number of channels in input sequence
             prediction_length: Length of time series to predict
             context_length: Length of context window
             feature_projection_dim: Dimension for feature projection
@@ -681,10 +681,10 @@ class ViTToTimeSeriesModel(nn.Module):
         self.pred_dim = pred_dim
         self.feature_projection_dim = feature_projection_dim
         self.d_model = d_model
-        self.num_channels = num_channels
+        self.seq_dim = seq_dim
         self.context_proj_dim = 32
 
-        self.value_embedding = ValueEmbedding(num_channels, self.context_proj_dim)
+        self.value_embedding = ValueEmbedding(seq_dim, self.context_proj_dim)
         self.position_embedding = PositionalEmbedding(self.context_proj_dim, dropout=ts_dropout)
         
         
@@ -692,7 +692,6 @@ class ViTToTimeSeriesModel(nn.Module):
         self.vit_encoder = create_rectangular_vit(
             image_height=128,  # Updated height for resized spectrograms
             image_width=128,  # Updated width for resized spectrograms
-            in_channels=num_channels,
             embed_dim=768,
             depth=3,
             num_heads=6,
