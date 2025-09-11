@@ -501,8 +501,8 @@ class ViTToTimeSeriesModel(nn.Module):
         self.num_channels = num_channels
         self.embed_dim = 256
         
-        if num_channels >= 64:
-            self.embed_channels_dim = 64  # Embedding dimension for each channel of ValueEmbedding
+        if num_channels >= 32:
+            self.embed_channels_dim = 32  # Embedding dimension for each channel of ValueEmbedding
         else:
             self.embed_channels_dim = num_channels  # Embedding dimension for each channel of ValueEmbedding
 

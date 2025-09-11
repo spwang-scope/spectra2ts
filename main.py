@@ -70,7 +70,7 @@ def parse_arguments():
                        help="Number of decoder layers")
     parser.add_argument("--d_ff", type=int, default=1024,
                        help="Feed-forward dimension")
-    parser.add_argument("--dropout", type=float, default=0.1,
+    parser.add_argument("--dropout", type=float, default=0.05,
                        help="Dropout rate for transformer")
     
     # Training arguments
@@ -78,15 +78,17 @@ def parse_arguments():
                        help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=1e-4,
                        help="Learning rate")
-    parser.add_argument("--train_epochs", type=int, default=30,
+    parser.add_argument("--train_epochs", type=int, default=100,
                        help="Number of training epochs")
     parser.add_argument("--weight_decay", type=float, default=1e-5,
                        help="Weight decay for optimizer")
     parser.add_argument("--warmup_epochs", type=int, default=5,
                        help="Number of warmup epochs")
     parser.add_argument("--scheduler", type=str, default="cosine",
-                       choices=["cosine", "step", "linear"],
+                       choices=["cosine", "step", "linear", "plateau"],
                        help="Learning rate scheduler")
+    parser.add_argument("--patience", type=int, default=20,
+                       help="Patience for early stopping")
     
     # Data arguments
     parser.add_argument("--root_path", type=str, default="../dataset/ETT-small",
@@ -166,7 +168,7 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
     # Learning rate scheduler
     if args.scheduler == "cosine":
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.train_epochs, eta_min=1e-6
+            optimizer, T_max=args.train_epochs, eta_min=5e-6
         )
     elif args.scheduler == "step":
         scheduler = optim.lr_scheduler.StepLR(
@@ -175,6 +177,10 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
     elif args.scheduler == "linear":
         scheduler = optim.lr_scheduler.LinearLR(
             optimizer, start_factor=1.0, end_factor=0.1, total_iters=args.train_epochs
+        )
+    elif args.scheduler == "plateau":
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6
         )
     else:
         scheduler = None
@@ -298,11 +304,12 @@ def train(args):
     # Create optimizer and scheduler
     logger.info("Creating optimizer and scheduler...")
     optimizer, scheduler = create_optimizer_and_scheduler(model, args)
-    criterion = nn.MSELoss() 
+    criterion = nn.HuberLoss(delta=0.1)
     
     # Training loop
     start_epoch = 0
     start_max_vali_loss = float('inf')
+    patience = args.patience
     
     if args.checkpoint_path:
         logger.info(f"Loading checkpoint from {args.checkpoint_path}...")
@@ -368,7 +375,10 @@ def train(args):
         
         # Learning rate scheduling
         if scheduler:
-            scheduler.step()
+            if args.scheduler == "plateau":
+                scheduler.step(vali_loss)
+            else:
+                scheduler.step()
         
         # Save checkpoint
         if vali_loss < start_max_vali_loss:
@@ -380,6 +390,13 @@ def train(args):
                           checkpoint_path, logger, scaler=args._scaler, args=args)
             args.checkpoint_path = checkpoint_path
             start_max_vali_loss = vali_loss
+            patience = args.patience
+        else:
+            patience -= 1
+            logger.info(f"No improvement in validation loss. Patience left: {patience}")
+            if patience == 0:
+                logger.info("Early stopping triggered.")
+                break
     
     logger.info("Training completed!")
 
