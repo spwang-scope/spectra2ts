@@ -554,11 +554,11 @@ class ViTToTimeSeriesModel(nn.Module):
         device = next(self.parameters()).device
         batch_size = context.size(0)
 
-        print('context shape:', context.shape)
+        #print('context shape:', context.shape)
 
         context = self.value_embedding(context)
 
-        print('context after value_embedding shape:', context.shape)
+        #print('context after value_embedding shape:', context.shape)
         
         # Step 1: Get last feature column of context as condition (already normalized by StandardScaler)
         context_condition = context[:, :, -1]  
@@ -572,7 +572,7 @@ class ViTToTimeSeriesModel(nn.Module):
         # Stack into batch tensor
         spectra_tensor = torch.stack(spectra_list, dim=0)
 
-        print('spectra_tensor shape:', spectra_tensor.shape)
+        #print('spectra_tensor shape:', spectra_tensor.shape)
         
         # Step 3: Process through ViT encoder
         vit_features = self.vit_encoder.get_last_hidden_state(spectra_tensor)  # (batch, num_patches+1, 768)
