@@ -6,7 +6,7 @@ Based on the original ViT paper and adapted for flexible input dimensions.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange, repeat, parse_shape
 from einops.layers.torch import Rearrange
 import math
 
@@ -14,7 +14,7 @@ import math
 class PatchEmbedding(nn.Module):
     """Convert image into patches and embed them."""
     
-    def __init__(self, image_height=64, image_width=96, patch_size=8, in_channels=3, embed_dim=768):
+    def __init__(self, image_height=64, image_width=96, patch_size=8, in_channels=3, embed_dim=64):
         super().__init__()
         self.image_height = image_height
         self.image_width = image_width
@@ -22,14 +22,23 @@ class PatchEmbedding(nn.Module):
         self.num_patches_h = image_height // patch_size
         self.num_patches_w = image_width // patch_size
         self.num_patches = self.num_patches_h * self.num_patches_w
-        
+        print('image_height, image_width:', image_height, image_width)
+        print(f"Number of patches: {self.num_patches} ({self.num_patches_h}x{self.num_patches_w})")
+        print('in_channels:', in_channels)
+        print('embed_dim:', embed_dim)
+        print('patch_size:', patch_size)
+        #exit()
+
         self.projection = nn.Sequential(
-            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', 
-                     p1=patch_size, p2=patch_size),
+            
             nn.Linear(patch_size * patch_size * in_channels, embed_dim)
         )
         
     def forward(self, x):
+        print('x shape in PatchEmbedding:', x.shape)
+        x = Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', 
+                     p1=self.patch_size, p2=self.patch_size)(x)
+        print('x shape after rearrange in PatchEmbedding:', x.shape)
         return self.projection(x)
 
 
@@ -303,15 +312,8 @@ def create_rectangular_vit(image_height=128, image_width=128, **kwargs):
     Returns:
         RectangularViT model
     """
-    # Optimize patch size based on image width
-    if image_width in [96, 192]:
-        patch_size = 8
-    elif image_width in [336]:
-        patch_size = 8  # Could also use 12 for fewer patches
-    elif image_width in [720]:
-        patch_size = 16  # Larger patches for very wide images
-    else:
-        patch_size = 8  # Default
+    
+    patch_size = 8  # Default
         
     return RectangularViT(
         image_height=image_height,

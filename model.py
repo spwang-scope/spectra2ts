@@ -23,7 +23,20 @@ from pytorch_stft import get_STFT_spectra  # Importing the STFT function from py
 import numpy as np
 import matplotlib.pyplot as plt
 
+class ValueEmbedding(nn.Module):
+    def __init__(self, seq_channels, embed_channels):
+        super(ValueEmbedding, self).__init__()
+        padding = 1 if torch.__version__ >= '1.5.0' else 2
+        self.tokenConv = nn.Conv1d(in_channels=seq_channels, out_channels=embed_channels,
+                                   kernel_size=3, padding=padding, padding_mode='circular', bias=False)
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(
+                    m.weight, mode='fan_in', nonlinearity='leaky_relu')
 
+    def forward(self, x):
+        x = self.tokenConv(x.permute(0, 2, 1)).transpose(1, 2)
+        return x
 
 class PositionalEncoding(nn.Module):
     """Positional encoding for transformer."""
@@ -486,25 +499,31 @@ class ViTToTimeSeriesModel(nn.Module):
         self.feature_projection_dim = feature_projection_dim
         self.ts_model_dim = ts_model_dim
         self.num_channels = num_channels
+        self.embed_dim = 256
         
-        
+        if num_channels >= 64:
+            self.embed_channels_dim = 64  # Embedding dimension for each channel of ValueEmbedding
+        else:
+            self.embed_channels_dim = num_channels  # Embedding dimension for each channel of ValueEmbedding
+
+        self.value_embedding = ValueEmbedding(seq_channels=num_channels, embed_channels=self.embed_channels_dim)
+
         # Rectangular ViT Encoder (128x128 spectrograms)
         self.vit_encoder = create_rectangular_vit(
             image_height=128,  # Updated height for resized spectrograms
             image_width=128,  # Updated width for resized spectrograms
-            in_channels=num_channels,
-            embed_dim=768,
+            in_channels=self.embed_channels_dim,
+            embed_dim=self.embed_dim,
             depth=3,
-            num_heads=6,
+            num_heads=8,
             mlp_ratio=4,
             dropout=0.1
         )
         
         # Linear projection for encoder features
-        vit_hidden_size = 768  # Default ViT hidden size
-        self.encoder_projection = nn.Linear(vit_hidden_size, feature_projection_dim)
-        
-        
+        self.encoder_projection = nn.Linear(self.embed_dim, feature_projection_dim)
+
+
         # Transformer Decoder with Cross-Attention
         self.ts_decoder = TransformerDecoderWithCrossAttention(
             d_model=ts_model_dim,
@@ -534,9 +553,15 @@ class ViTToTimeSeriesModel(nn.Module):
         """
         device = next(self.parameters()).device
         batch_size = context.size(0)
+
+        print('context shape:', context.shape)
+
+        context = self.value_embedding(context)
+
+        print('context after value_embedding shape:', context.shape)
         
         # Step 1: Get last feature column of context as condition (already normalized by StandardScaler)
-        context_condition = context[:, :, -1]  # (batch, context_len)
+        context_condition = context[:, :, -1]  
         
         # Step 2: Generate spectrograms from normalized context
         spectra_list = []
@@ -545,7 +570,9 @@ class ViTToTimeSeriesModel(nn.Module):
             spectra_list.append(spectra)
         
         # Stack into batch tensor
-        spectra_tensor = torch.stack(spectra_list, dim=0)  # (batch, channels, 64, context_length)
+        spectra_tensor = torch.stack(spectra_list, dim=0)
+
+        print('spectra_tensor shape:', spectra_tensor.shape)
         
         # Step 3: Process through ViT encoder
         vit_features = self.vit_encoder.get_last_hidden_state(spectra_tensor)  # (batch, num_patches+1, 768)
