@@ -387,6 +387,8 @@ def train(args):
             if (i + 1) % 100 == 0:
                 logger.info(f"\titers: {i + 1}, epoch: {epoch + 1} | loss: {loss.item():.7f}")
                 iter_count = 0
+                iter_cuda_num = next(model.parameters()).device
+                print(f"Cuda Memory after allocation (allocated): {torch.cuda.memory_allocated(iter_cuda_num)}")
 
             loss.backward()
             
