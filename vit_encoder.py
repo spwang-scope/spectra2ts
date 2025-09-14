@@ -26,7 +26,9 @@ class PatchEmbedding(nn.Module):
         self.projection = nn.Sequential(
             Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', 
                      p1=patch_size, p2=patch_size),
-            nn.Linear(patch_size * patch_size * in_channels, embed_dim)
+            nn.LayerNorm(in_channels * patch_size * patch_size),
+            nn.Linear(patch_size * patch_size * in_channels, embed_dim),
+            nn.LayerNorm(embed_dim)
         )
         
     def forward(self, x):

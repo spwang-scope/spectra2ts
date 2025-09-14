@@ -5,3 +5,6 @@ __pycache__
 data/
 */
 *.txt
+*.sh
+*.err
+*.out
