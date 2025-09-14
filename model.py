@@ -23,7 +23,20 @@ from pytorch_stft import get_STFT_spectra  # Importing the STFT function from py
 import numpy as np
 import matplotlib.pyplot as plt
 
+class ValueEmbedding(nn.Module):
+    def __init__(self, seq_channels, embed_channels):
+        super(ValueEmbedding, self).__init__()
+        padding = 1 if torch.__version__ >= '1.5.0' else 2
+        self.tokenConv = nn.Conv1d(in_channels=seq_channels, out_channels=embed_channels,
+                                   kernel_size=3, padding=padding, padding_mode='circular', bias=False)
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(
+                    m.weight, mode='fan_in', nonlinearity='leaky_relu')
 
+    def forward(self, x):
+        x = self.tokenConv(x.permute(0, 2, 1)).transpose(1, 2)
+        return x
 
 class PositionalEncoding(nn.Module):
     """Positional encoding for transformer."""
@@ -51,7 +64,7 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
 
-
+'''
 class DecoderPositionalEncoding(nn.Module):
     """
     Dynamic positional encoding for transformer decoder that computes encodings on-the-fly.
@@ -116,7 +129,7 @@ class DecoderPositionalEncoding(nn.Module):
     def clear_cache(self):
         """Clear the positional encoding cache."""
         self._pe_cache.clear()
-
+'''
 
 class TransformerDecoderLayer(nn.Module):
     """
@@ -219,7 +232,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         self.value_embedding = nn.Linear(time_series_dim, d_model)
         
         # Dynamic positional encoding for variable prediction lengths
-        self.pos_encoding = DecoderPositionalEncoding(d_model, dropout=dropout)
+        self.pos_encoding = PositionalEncoding(d_model, dropout=dropout)
         
         # Project encoder output to decoder dimension for cross-attention
         self.encoder_projection = nn.Linear(encoder_dim, d_model)
@@ -259,7 +272,7 @@ class TransformerDecoderWithCrossAttention(nn.Module):
         Initialize decoder parameters with better schemes for gradient sensitivity.
         """
         # Initialize start token with small values close to expected range
-        nn.init.normal_(self.start_token, mean=0.0, std=0.02)
+        nn.init.normal_(self.start_token, mean=1.0, std=0.02)
         
         # Initialize value embedding layer
         nn.init.xavier_uniform_(self.value_embedding.weight)
@@ -477,16 +490,23 @@ class ViTToTimeSeriesModel(nn.Module):
         self.feature_projection_dim = feature_projection_dim
         self.ts_model_dim = ts_model_dim
         self.num_channels = num_channels
+        self.embed_dim = 256
         
-        
+        # Value embedding for time series input with too many channels
+        if num_channels > 32:
+            self.embed_channels_dim = 32  # Embedding dimension for each channel of ValueEmbedding
+        else:
+            self.embed_channels_dim = 16  # Embedding dimension for each channel of ValueEmbedding
+        self.value_embedding = ValueEmbedding(seq_channels=num_channels, embed_channels=self.embed_channels_dim)
+
         # Rectangular ViT Encoder (128x128 spectrograms)
         self.vit_encoder = create_rectangular_vit(
             image_height=128,  # Updated height for resized spectrograms
             image_width=128,  # Updated width for resized spectrograms
-            in_channels=num_channels,
+            in_channels=self.embed_channels_dim,
             embed_dim=768,
-            depth=3,
-            num_heads=10,
+            depth=1,
+            num_heads=8,
             mlp_ratio=4,
             dropout=0.1
         )
@@ -525,6 +545,8 @@ class ViTToTimeSeriesModel(nn.Module):
         """
         device = next(self.parameters()).device
         batch_size = context.size(0)
+
+        context = self.value_embedding(context)
         
         # Step 1: Get last feature column of context as condition (already normalized by StandardScaler)
         context_condition = context[:, :, -1]  # (batch, context_len)
