@@ -58,7 +58,7 @@ def parse_arguments():
                        help="Length of time series to predict")
     parser.add_argument("--seq_len", type=int, default=96,
                        help="Length of context window")
-    parser.add_argument("--feature_projection_dim", type=int, default=128,
+    parser.add_argument("--feature_projection_dim", type=int, default=256,
                        help="Dimension for QKV vectors in decoder cross-attention")
     parser.add_argument("--time_series_dim", type=int, default=1,
                        help="Dimension of time series (1 for univariate)")
@@ -89,7 +89,8 @@ def parse_arguments():
                        help="Learning rate scheduler")
     parser.add_argument("--patience", type=int, default=50,
                        help="Patience for early stopping")
-    
+    parser.add_argument("--iter_count", type=int, default=10000,
+                        help="Number of training epochs")
     # Data arguments
     parser.add_argument("--root_path", type=str, default="../dataset/ETT-small",
                        help="Directory containing dataset")
@@ -180,15 +181,15 @@ def create_optimizer_and_scheduler(model: nn.Module, args):
     # Learning rate scheduler
     if args.scheduler == "cosine":
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.train_epochs, eta_min=1e-6
+            optimizer, T_max=args.iter_count, eta_min=args.learning_rate * 0.01
         )
     elif args.scheduler == "step":
         scheduler = optim.lr_scheduler.StepLR(
-            optimizer, step_size=args.train_epochs // 3, gamma=0.1
+            optimizer, step_size=args.iter_count // 3, gamma=0.1
         )
     elif args.scheduler == "linear":
         scheduler = optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=1.0, end_factor=0.1, total_iters=args.train_epochs
+            optimizer, start_factor=1.0, end_factor=0.1, total_iters=args.iter_count
         )
     else:
         scheduler = None
@@ -371,7 +372,7 @@ def train(args):
         epoch_time = time.time()
         
         for i, (batch_x, batch_y) in enumerate(train_loader):
-            iter_count += 1
+            iter_count += len(train_loader)
             optimizer.zero_grad()
             batch_x = batch_x.float().to(device)
             batch_y = batch_y.float().to(device)
@@ -403,6 +404,9 @@ def train(args):
             loss.backward()
             
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            if iter_count > 10000:
+                break  # For quicker epochs during testing
             
             optimizer.step()
             
