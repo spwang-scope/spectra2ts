@@ -340,7 +340,8 @@ def train(args):
     # Create optimizer and scheduler
     logger.info("Creating optimizer and scheduler...")
     optimizer, scheduler = create_optimizer_and_scheduler(model, args)
-    criterion = nn.HuberLoss(delta=0.1)  
+
+    criterion = nn.MSELoss()
     
     # Setup tensorboard
     writer = None

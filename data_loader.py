@@ -22,7 +22,7 @@ class Dataset_Custom(Dataset):
         self.pred_len = size[1]
 
         # init
-        type_map = {'train': 0, 'test': 1, 'val': 2}
+        type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
         self.flag = flag
 
@@ -97,7 +97,15 @@ class Dataset_Custom(Dataset):
         seq_x = self.data_x[s_begin:s_end]
         seq_y = self.data_y[r_begin:r_end]
 
-        return seq_x, seq_y
+        diff_x = seq_x[1:] - seq_x[:-1]   # [n-1, d]
+        diff_y = seq_y[1:] - seq_y[:-1]   # [m-1, d]
+        mean_x = seq_x.mean(dim=0, keepdim=True)  # [1, d]
+        mean_y = seq_y.mean(dim=0, keepdim=True)  # [1, d]
+        diff_x = torch.cat([mean_x, diff_x], dim=0)  # [n, d]
+        diff_y = torch.cat([mean_y, diff_y], dim=0)  # [m, d]
+
+        return diff_x, seq_y
+        #return seq_x, seq_y
 
     def __len__(self):
         return len(self.data_x) - self.seq_len - self.pred_len + 1
